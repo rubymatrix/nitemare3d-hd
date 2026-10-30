@@ -29,6 +29,7 @@
 #include "hd_tex.h"
 #include "hd_pack.h"
 #include "hud.h"
+#include "video.h"
 
 /* Game entry points in the recompiled code (see re/names.txt). */
 #define G_INIT_INSTANCE 0x101010ccu /* parse command line + initialise all subsystems */
@@ -46,8 +47,8 @@
 #define DS_HWND_STATUS 0x00bc
 
 static SDL_Window *window;
-static SDL_Renderer *renderer;
-static SDL_Texture *texture;
+static const video_backend *video; /* puts frames on screen (src/video.h) */
+static int have_target;
 static SDL_AudioDeviceID audio_dev;
 static int quit_requested;
 static int window_active = 1;
@@ -78,16 +79,14 @@ static int render_w = 320, render_h = 200;
 static void setup_render_target(int w, int h) {
     if (w < 64) w = 64;
     if (h < 48) h = 48;
-    if (w == render_w && h == render_h && texture) return;
+    if (w == render_w && h == render_h && have_target) return;
     render_w = w;
     render_h = h;
-    if (texture) SDL_DestroyTexture(texture);
-    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
     if (w == 320 && h == 200) {
-        SDL_RenderSetLogicalSize(renderer, 320, 240); /* non-square pixels: present at 4:3 */
+        have_target = video->set_source(w, h, 320, 240) == 0; /* non-square pixels: present at 4:3 */
         hd_set_output(0, 0);
     } else {
-        SDL_RenderSetLogicalSize(renderer, w, h);
+        have_target = video->set_source(w, h, w, h) == 0;
         hd_set_output(w, h);
     }
 }
@@ -95,7 +94,7 @@ static void setup_render_target(int w, int h) {
 static void follow_window_size(void) {
     if (res_mode != RES_WINDOW) return;
     int w, h;
-    if (SDL_GetRendererOutputSize(renderer, &w, &h) == 0) setup_render_target(w, h);
+    if (video->output_size(&w, &h) == 0) setup_render_target(w, h);
 }
 
 /* ------------------------------------------------------------------ video */
@@ -120,13 +119,13 @@ static void redraw(void) {
     last_redraw_us = host_time_us();
     if (getenv("N3D_TURNLOG"))
         fprintf(stderr, "turn %u %.2f\n", SDL_GetTicks(), (int16_t)MEMR16(SEGLIN(RT_SEL_DS, 0x4bda)) + mouse_accum);
-    void *pixels;
+    uint32_t *pixels;
     int pitch;
     if (hd_enabled()) {
         uint64_t c0 = host_time_us();
-        if (SDL_LockTexture(texture, NULL, &pixels, &pitch) == 0) {
-            hd_compose(last_frame, (const uint8_t(*)[3])palette, pixels, pitch / 4);
-            SDL_UnlockTexture(texture);
+        if ((pixels = video->lock(&pitch))) {
+            hd_compose(last_frame, (const uint8_t(*)[3])palette, pixels, pitch);
+            video->unlock();
         }
         if (getenv("N3D_HDPROF")) {
             static uint64_t acc, first;
@@ -138,20 +137,18 @@ static void redraw(void) {
                 acc = 0; cnt = 0; first = host_time_us();
             }
         }
-    } else if (SDL_LockTexture(texture, NULL, &pixels, &pitch) == 0) {
+    } else if ((pixels = video->lock(&pitch))) {
         for (int y = 0; y < 200; y++) {
-            uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
+            uint32_t *row = pixels + y * pitch;
             const uint8_t *src = last_frame + y * 320;
             for (int x = 0; x < 320; x++) {
                 const uint8_t *c = palette[src[x]];
                 row[x] = 0xff000000u | ((uint32_t)c[0] << 16) | ((uint32_t)c[1] << 8) | c[2];
             }
         }
-        SDL_UnlockTexture(texture);
+        video->unlock();
     }
-    SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, texture, NULL, NULL);
-    SDL_RenderPresent(renderer);
+    video->present();
 }
 
 /* Debug aid: N3D_SHOTS=dir saves every 30th presented frame as BMP. */
@@ -329,7 +326,7 @@ void host_mouse_pos(int *x, int *y) {
     float lx, ly;
     SDL_GetMouseState(&mx, &my);
     if (rel_mode) { mx = vcur_x; my = vcur_y; } /* captured: menus use a virtual cursor */
-    SDL_RenderWindowToLogical(renderer, mx, my, &lx, &ly);
+    video->window_to_logical(mx, my, &lx, &ly);
     if (hd_enabled()) {
         hd_output_to_game((int)lx, (int)ly, x, y);
         return;
@@ -952,6 +949,7 @@ static void usage(const char *argv0) {
             "  --scale N    initial window size: 320x240 * N\n"
             "  --fullscreen start in fullscreen (Alt+Enter toggles)\n"
             "  --renderer metal|opengl   SDL render backend (default: SDL's choice)\n"
+            "  --no-vsync   don't wait for the display refresh\n"
             "  --no-spaces  macOS: fullscreen without a separate Space (can avoid tearing)\n"
             "  --hidpi / --no-hidpi  render at device pixels on HiDPI screens (default: on; off in the browser)\n"
             "  --sensitivity F  mouse look speed in degrees per mouse count (default 0.12)\n"
@@ -982,6 +980,7 @@ static void host_shutdown(void) {
     rt_callf(G_SHUTDOWN, 0, NULL);
     if (audio_dev) SDL_CloseAudioDevice(audio_dev);
     if (wav_out) { wav_header(wav_out, wav_bytes); fclose(wav_out); }
+    if (video) video->shutdown();
     SDL_Quit();
     SDL_free(pref);
 #ifdef __EMSCRIPTEN__
@@ -1105,7 +1104,7 @@ static void main_iteration(void) {
 int main(int argc, char **argv) {
     const char *data_dir = "data";
     const char *user_dir = NULL;
-    int scale = 3, force_fm = 0, no_spaces = 0;
+    int scale = 3, force_fm = 0, no_spaces = 0, vsync = 1;
     const char *renderer_name = NULL;
 #ifdef __EMSCRIPTEN__
     int hidpi = 0; /* full device-pixel resolution is opt-in: the renderer is single-threaded here */
@@ -1125,6 +1124,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
         else if (!strcmp(argv[i], "--renderer") && i + 1 < argc) renderer_name = argv[++i];
         else if (!strcmp(argv[i], "--no-spaces")) no_spaces = 1;
+        else if (!strcmp(argv[i], "--no-vsync")) vsync = 0;
         else if (!strcmp(argv[i], "--hidpi")) hidpi = 1;
         else if (!strcmp(argv[i], "--no-hidpi")) hidpi = 0;
         else if (!strcmp(argv[i], "--soundfont") && i + 1 < argc) soundfont = argv[++i];
@@ -1222,7 +1222,6 @@ int main(int argc, char **argv) {
     }
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
     if (renderer_name) SDL_SetHint(SDL_HINT_RENDER_DRIVER, renderer_name);
     if (no_spaces) SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
     int win_w = 320 * scale, win_h = 240 * scale;
@@ -1240,15 +1239,11 @@ int main(int argc, char **argv) {
     window = SDL_CreateWindow("Nitemare-3D", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, win_h,
                               SDL_WINDOW_RESIZABLE | (hidpi ? SDL_WINDOW_ALLOW_HIGHDPI : 0) | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     SDL_RaiseWindow(window); /* take focus so the mouse is captured from the start */
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!renderer) renderer = SDL_CreateRenderer(window, -1, 0);
-    if (getenv("N3D_DEBUG")) {
-        SDL_RendererInfo ri;
-        SDL_GetRendererInfo(renderer, &ri);
-        SDL_DisplayMode dm;
-        SDL_GetCurrentDisplayMode(0, &dm);
-        fprintf(stderr, "renderer: %s vsync=%d display %dx%d@%dHz\n", ri.name, (ri.flags & SDL_RENDERER_PRESENTVSYNC) != 0, dm.w, dm.h, dm.refresh_rate);
+    if (video_sdl.init(window, vsync) != 0) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nitemare-3D", SDL_GetError(), window);
+        return 1;
     }
+    video = &video_sdl;
     {
         int w = render_w, h = render_h;
         render_w = render_h = 0;

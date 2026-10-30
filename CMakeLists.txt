@@ -24,6 +24,7 @@ endif()
 
 add_executable(nitemare3d
   src/host_sdl.c
+  src/video_sdl.c
   src/music.c
   src/dls.c
   src/msadlib.c
