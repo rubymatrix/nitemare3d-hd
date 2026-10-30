@@ -948,8 +948,12 @@ static void usage(const char *argv0) {
             "  --classic    original 320x200 frame, scaled (same as --res 320x200)\n"
             "  --scale N    initial window size: 320x240 * N\n"
             "  --fullscreen start in fullscreen (Alt+Enter toggles)\n"
+#ifdef N3D_D3D12
+            "  --renderer d3d12|direct3d11|opengl   video backend (default: d3d12, else SDL's choice)\n"
+#else
             "  --renderer metal|opengl   SDL render backend (default: SDL's choice)\n"
-            "  --no-vsync   don't wait for the display refresh\n"
+#endif
+            "  --no-vsync   don't wait for the display refresh (with d3d12: tearing allowed, for VRR displays)\n"
             "  --no-spaces  macOS: fullscreen without a separate Space (can avoid tearing)\n"
             "  --hidpi / --no-hidpi  render at device pixels on HiDPI screens (default: on; off in the browser)\n"
             "  --sensitivity F  mouse look speed in degrees per mouse count (default 0.12)\n"
@@ -1222,7 +1226,7 @@ int main(int argc, char **argv) {
     }
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-    if (renderer_name) SDL_SetHint(SDL_HINT_RENDER_DRIVER, renderer_name);
+    if (renderer_name && strcmp(renderer_name, "d3d12")) SDL_SetHint(SDL_HINT_RENDER_DRIVER, renderer_name);
     if (no_spaces) SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
     int win_w = 320 * scale, win_h = 240 * scale;
     {
@@ -1239,11 +1243,19 @@ int main(int argc, char **argv) {
     window = SDL_CreateWindow("Nitemare-3D", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, win_h,
                               SDL_WINDOW_RESIZABLE | (hidpi ? SDL_WINDOW_ALLOW_HIGHDPI : 0) | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     SDL_RaiseWindow(window); /* take focus so the mouse is captured from the start */
-    if (video_sdl.init(window, vsync) != 0) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nitemare-3D", SDL_GetError(), window);
-        return 1;
+#ifdef N3D_D3D12
+    if (!renderer_name || !strcmp(renderer_name, "d3d12")) {
+        if (video_d3d12.init(window, vsync) == 0) video = &video_d3d12;
+        else fprintf(stderr, "d3d12 unavailable, using SDL's renderer\n");
     }
-    video = &video_sdl;
+#endif
+    if (!video) {
+        if (video_sdl.init(window, vsync) != 0) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nitemare-3D", SDL_GetError(), window);
+            return 1;
+        }
+        video = &video_sdl;
+    }
     {
         int w = render_w, h = render_h;
         render_w = render_h = 0;

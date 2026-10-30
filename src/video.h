@@ -27,3 +27,6 @@ typedef struct video_backend {
 } video_backend;
 
 extern const video_backend video_sdl;
+#ifdef N3D_D3D12
+extern const video_backend video_d3d12;
+#endif
