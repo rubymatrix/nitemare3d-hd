@@ -79,6 +79,14 @@ You can build on Linux and Windows too. See [docs/TECHNICAL.md](docs/TECHNICAL.m
 Gamepads work as well: left stick moves, right stick turns, right trigger
 fires, A uses.
 
+## New HUD, bob and lean
+
+With the view at full size, the 3D view fills the whole screen and the old
+status bar is replaced by a gothic HUD: your face in a pointed frame, a
+health bar, the ammo for your weapon, and your keys and items. Walking
+bobs the view and weapon like in Quake, and strafing leans the view a
+little. The HUD art is in `assets/hud/`.
+
 ## Useful options
 
 | Option | What it does |
@@ -87,6 +95,9 @@ fires, A uses.
 | `--classic` | the original 320×200 look |
 | `--soundfont FILE.sf2` | better music, using any General MIDI SoundFont |
 | `--fm` | the 1994 Sound Blaster music sound |
+| `--hud classic` | the original status bar instead of the new gothic HUD |
+| `--bob 0` | turn off the view and weapon bob while walking |
+| `--roll 0` | turn off the view leaning when you strafe |
 
 Put an option at the end of the play command, for example
 `./build/nitemare3d --data original/data --classic`. Every other option is

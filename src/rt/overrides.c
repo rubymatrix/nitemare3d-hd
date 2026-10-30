@@ -36,12 +36,13 @@ void f_1010_d6de(void) {
 /* 1010:b9a6: everything drawn over the 3D view each frame, through
  * FUN_1010_a308 (HUD element painter): 0x12 frame decorations + current
  * message, 2 the weapon, 0x18 the crosshair/indicator. Each is captured as
- * an overlay layer for the hi-res compositor. */
+ * an overlay layer for the hi-res compositor (the weapon as its own, so it
+ * can bob and sit at the bottom edge under the full-screen HUD). */
 void f_1010_b9a6(void) {
     RT_ENTER(0x1010b9a6u);
     static const uint16_t parts[3] = {0x12, 2, 0x18};
     for (int i = 0; i < 3; i++) {
-        hd_layer_begin(HD_ANCHOR_CENTER);
+        hd_layer_begin(i == 1 ? HD_ANCHOR_WEAPON : HD_ANCHOR_CENTER); /* the weapon bobs on its own */
         rt_callf(0x1010a308u, 1, &parts[i]);
     }
     hd_overlays_done();
@@ -49,11 +50,15 @@ void f_1010_b9a6(void) {
 }
 
 /* 1018:035a draw_view_picture(x, y, picture, flags): the gargoyles in the
- * view corners are drawn with it; anchor them to the edges of a widened view. */
+ * view corners and the ornament at the top are drawn with it (FUN_1010_a308
+ * part 0x12, pictures DS:37c8/37d2/37dc); anchor them to the edges of a
+ * widened view, or leave them out under the full-screen gothic HUD. */
 void f_1018_035a(void) {
     int prev = hd_layer_current();
     if (prev) {
         int x = (int16_t)MEMR16(SEGLIN(rSS, (uint16_t)(rSP + 4)));
+        uint16_t pic = MEMR16(SEGLIN(rSS, (uint16_t)(rSP + 8)));
+        if (hd_full_hud() && (pic == 0x37c8 || pic == 0x37d2 || pic == 0x37dc)) { retf(); return; }
         hd_layer_begin(x < 100 ? HD_ANCHOR_LEFT : x > 220 ? HD_ANCHOR_RIGHT : HD_ANCHOR_CENTER);
     }
     f_1018_035a_orig(); /* pops the return address itself */

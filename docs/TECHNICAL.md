@@ -195,6 +195,44 @@ How it works (`src/hd.c`, hooks in `src/rt/overrides.c`):
   Hugo's coat), so the host palette starts out with them.
 * Shrinking the view (smaller than the maximum) keeps it at its 4:3 place.
 
+### Gothic HUD and view bob
+
+With the view at its largest size, the hi-res view now fills the whole
+screen and the 320x200 status bar is replaced by a gothic HUD
+(`src/hud.c`, art in `assets/hud/`): the player's portrait (the game's own
+face pictures, which change with health) in a pointed-arch frame, a health
+bar with the percentage and score, timed powers as thin bars under it, the
+items carried, the keys, and the ammo of the current weapon between two
+ornaments. The values are read from the game's own memory every frame
+(the same variables the status bar painter `FUN_1010_a308` reads). The
+corner gargoyles and the ornament at the top of the view are left out, the
+horizon is moved to the middle of the screen and the weapon to its bottom
+edge. Shrinking the view brings the original status bar back.
+
+While moving, the view bobs the way Quake's does (`cl_bob`, `cl_bobcycle`
+0.6 s, `cl_bobup` 0.5): the eye rises and falls by 0.3 + 0.7 sin of the
+step phase times an amount proportional to the speed, and the weapon
+follows it, swaying sideways at half that rate. Starting and stopping ease
+in and out.
+
+The view also rolls into sideways motion like Quake's `cl_rollangle`: the
+sideways part of the player's velocity leans the camera, 2 degrees at
+walking speed. The view is rendered with a small overscan and turned about
+its centre while compositing, so no corners are missing; the HUD and the
+weapon stay level.
+
+| Option | Meaning |
+| --- | --- |
+| `--hud gothic\|classic` | gothic HUD (default) or the original status bar |
+| `--hud-pak FILE` | HUD art (default `$N3D_HUD_PAK`, else `hud.pak` next to the program) |
+| `--bob F` | bob strength: `0` off, `1` default, `2` double |
+| `--roll DEG` | view roll at walking speed, degrees (default 2, `0` off) |
+
+The build packs `assets/hud/*.png` and the bitmap font into `hud.pak`
+with `tools/hud_pack.py` (needs `python3`; without it the classic status
+bar is used). The browser build preloads it; `?hud=classic`, `?bob=0` and
+`?roll=0` work as URL options.
+
 ### Texture filtering and upscaling
 
 The hi-res view is drawn in true colour (`src/hd_tex.c`); the HUD and menus

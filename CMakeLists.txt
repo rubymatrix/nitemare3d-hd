@@ -36,7 +36,23 @@ add_executable(nitemare3d
   src/hd.c
   src/hd_tex.c
   src/hd_pack.c
+  src/hud.c
   ${GEN_SOURCES})
+
+# Gothic HUD art (assets/hud) -> hud.pak next to the program (see README, "Gothic HUD").
+find_package(Python3 COMPONENTS Interpreter)
+file(GLOB HUD_ASSETS ${CMAKE_SOURCE_DIR}/assets/hud/*.png ${CMAKE_SOURCE_DIR}/assets/hud/*.fnt)
+if(Python3_Interpreter_FOUND AND HUD_ASSETS)
+  add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/hud.pak
+    COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/hud_pack.py ${CMAKE_SOURCE_DIR}/assets/hud ${CMAKE_BINARY_DIR}/hud.pak
+    DEPENDS ${HUD_ASSETS} ${CMAKE_SOURCE_DIR}/tools/hud_pack.py
+    COMMENT "Packing HUD art")
+  add_custom_target(hud_pak ALL DEPENDS ${CMAKE_BINARY_DIR}/hud.pak)
+  add_dependencies(nitemare3d hud_pak)
+  set(N3D_HUD_PAK ${CMAKE_BINARY_DIR}/hud.pak)
+else()
+  message(WARNING "python3 or assets/hud missing: no hud.pak, the classic status bar is used")
+endif()
 
 target_include_directories(nitemare3d PRIVATE src third_party/nuked_opl3 third_party/tinysoundfont third_party/stb_vorbis)
 if(EMSCRIPTEN)
@@ -61,6 +77,9 @@ if(EMSCRIPTEN)
   endif()
   if(N3D_WASM_DATA)
     target_link_options(nitemare3d PRIVATE --preload-file "${N3D_WASM_DATA}@/bundled")
+  endif()
+  if(N3D_HUD_PAK)
+    target_link_options(nitemare3d PRIVATE --preload-file "${N3D_HUD_PAK}@/hud.pak")
   endif()
   set_target_properties(nitemare3d PROPERTIES SUFFIX ".js")
   # page shell next to nitemare3d.js / .wasm

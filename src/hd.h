@@ -33,10 +33,17 @@ int hd_rerender(void);
  * the host shows hi-res frames on its own schedule, see --fps). */
 void hd_note_mouse_turn(int degrees);
 int hd_view_live(void);
-enum { HD_ANCHOR_CENTER = 1, HD_ANCHOR_LEFT = 2, HD_ANCHOR_RIGHT = 3 };
+enum { HD_ANCHOR_CENTER = 1, HD_ANCHOR_LEFT = 2, HD_ANCHOR_RIGHT = 3, HD_ANCHOR_WEAPON = 4 };
 void hd_layer_begin(int anchor);  /* following draws into the view are an overlay layer */
+/* View bob strength (Quake-style eye and weapon bob while moving): 0 off, 1 default. */
+extern double hd_bob_scale;
+/* Quake-style view roll into sideways motion, in degrees at walking speed (0 off). */
+extern double hd_roll_angle;
 void hd_layer_end(void);
 int hd_layer_current(void);      /* anchor of the open layer, 0 if none */
+/* The gothic HUD replaces the status bar: the view fills the output and the
+ * frame decorations around it (corner gargoyles, top ornament) are left out. */
+int hd_full_hud(void);
 void hd_overlays_done(void);      /* all regular overlays of this frame are drawn */
 void hd_object_queued(uint32_t obj, uint8_t frame); /* the original queued this object with this frame (then animated it) */
 void hd_animate_object(uint32_t obj); /* overrides.c: animate like FUN_1010_cbce does */

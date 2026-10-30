@@ -3,7 +3,7 @@
 
     python3 -I tools/web_site.py --data original/data [--episodes 1] [--out build-web/site]
 
-Copies the page shell and nitemare3d.js/.wasm from the Emscripten build
+Copies the page shell and nitemare3d.js/.wasm/.data (HUD art) from the Emscripten build
 folder, the game data files into data/ and the pre-rendered tunes into
 data/music/, and writes data/manifest.json. The page (web/n3d-web.js) finds
 the manifest, downloads the data before showing "Click to play" and streams
@@ -51,6 +51,9 @@ def main():
         if not os.path.isfile(src):
             sys.exit(f"missing {src}: build the browser version first (README, 'Browser (WebAssembly)')")
         shutil.copy2(src, os.path.join(out, f))
+    hud = os.path.join(args.build, "nitemare3d.data")  # preloaded hud.pak (gothic HUD art)
+    if os.path.isfile(hud):
+        shutil.copy2(hud, os.path.join(out, "nitemare3d.data"))
 
     names = list(COMMON)
     for ep in [e.strip() for e in args.episodes.split(",") if e.strip()]:

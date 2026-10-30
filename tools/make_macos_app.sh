@@ -85,12 +85,13 @@ for f in "$ROOT"/original/data/*; do
   cp -R "$f" "$APP/Contents/Resources/data/"
 done
 cp -R "$PACK" "$APP/Contents/Resources/hdpack"
+[ -f "$ROOT/build/hud.pak" ] && cp "$ROOT/build/hud.pak" "$APP/Contents/Resources/hud.pak"
 
 # Launcher
 cat > "$APP/Contents/MacOS/Nitemare3D" <<'EOF'
 #!/bin/sh
 C="$(cd "$(dirname "$0")/.." && pwd)"
-exec "$C/MacOS/nitemare3d-bin" --data "$C/Resources/data" --hd-pack "$C/Resources/hdpack" \
+exec "$C/MacOS/nitemare3d-bin" --data "$C/Resources/data" --hd-pack "$C/Resources/hdpack" --hud-pak "$C/Resources/hud.pak" \
   --res desktop --fullscreen --no-spaces --filter aniso --aniso 16 --upscale scale6x $N3D_ARGS "$@"
 EOF
 chmod +x "$APP/Contents/MacOS/Nitemare3D"

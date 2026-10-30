@@ -28,6 +28,7 @@
 #include "hd.h"
 #include "hd_tex.h"
 #include "hd_pack.h"
+#include "hud.h"
 
 /* Game entry points in the recompiled code (see re/names.txt). */
 #define G_INIT_INSTANCE 0x101010ccu /* parse command line + initialise all subsystems */
@@ -962,7 +963,11 @@ static void usage(const char *argv0) {
             "  --upscale none|scale2x|scale3x|scale4x|scale6x   pixel-art upscaling of textures (default scale4x)\n"
             "  --texture-quality off|high   nearest + no upscaling / aniso 16 + scale4x\n"
             "  --hd-pack DIR  replacement art pack (re/upscale/pack.py) for the hi-res renderer\n"
-            "               (default: $N3D_HDPACK; N3D_HDPACK_LOG=file lists used images still missing)\n",
+            "               (default: $N3D_HDPACK; N3D_HDPACK_LOG=file lists used images still missing)\n"
+            "  --hud gothic|classic  full-screen gothic HUD over the largest view, or the original status bar (default gothic)\n"
+            "  --hud-pak FILE  HUD art made by tools/hud_pack.py (default: $N3D_HUD_PAK, else hud.pak next to the program)\n"
+            "  --bob F      Quake-style view and weapon bob while moving: 0 off, 1 default, 2 double\n"
+            "  --roll DEG   Quake-style view roll into sideways motion, degrees at walking speed (default 2, 0 off)\n",
             argv0);
 }
 
@@ -1110,6 +1115,8 @@ int main(int argc, char **argv) {
     const char *soundfont = getenv("N3D_SOUNDFONT");
     const char *music_dir = getenv("N3D_MUSIC");
     const char *hd_pack = getenv("N3D_HDPACK");
+    const char *hud_pak = getenv("N3D_HUD_PAK");
+    int hud_on = 1;
     char game_args[256] = "";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--data") && i + 1 < argc) data_dir = argv[++i];
@@ -1144,6 +1151,15 @@ int main(int argc, char **argv) {
             else { usage(argv[0]); return 1; }
         }
         else if (!strcmp(argv[i], "--hd-pack") && i + 1 < argc) hd_pack = argv[++i];
+        else if (!strcmp(argv[i], "--hud-pak") && i + 1 < argc) hud_pak = argv[++i];
+        else if (!strcmp(argv[i], "--hud") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "gothic")) hud_on = 1;
+            else if (!strcmp(v, "classic")) hud_on = 0;
+            else { usage(argv[0]); return 1; }
+        }
+        else if (!strcmp(argv[i], "--bob") && i + 1 < argc) hd_bob_scale = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--roll") && i + 1 < argc) hd_roll_angle = atof(argv[++i]);
         else if (!strcmp(argv[i], "--classic")) { res_mode = RES_FIXED; render_w = 320; render_h = 200; }
         else if (!strcmp(argv[i], "--res") && i + 1 < argc) {
             const char *r = argv[++i];
@@ -1162,6 +1178,7 @@ int main(int argc, char **argv) {
     }
     if (scale < 1) scale = 1;
     if (hd_pack) hd_pack_load(hd_pack);
+    hud_set_enabled(hud_on);
 
 #ifdef __EMSCRIPTEN__
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
@@ -1170,6 +1187,21 @@ int main(int argc, char **argv) {
 #endif
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
+    }
+    if (hud_on) {
+#ifdef __EMSCRIPTEN__
+        if (!hud_pak) hud_pak = "/hud.pak"; /* preloaded with the build */
+        hud_load(hud_pak);
+#else
+        if (hud_pak) hud_load(hud_pak);
+        else {
+            char *base = SDL_GetBasePath();
+            char path[1200];
+            snprintf(path, sizeof path, "%shud.pak", base ? base : "");
+            SDL_free(base);
+            if (!hud_load(path)) hud_load("hud.pak");
+        }
+#endif
     }
     if (!user_dir) {
         pref = SDL_GetPrefPath("Gray Design Associates", "Nitemare3D");

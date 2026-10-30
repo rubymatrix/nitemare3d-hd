@@ -25,6 +25,7 @@
 #include "hd.h"
 #include "hd_tex.h"
 #include "hd_pack.h"
+#include "hud.h"
 #include "rt/rt.h"
 #include "rt/host.h"
 
@@ -74,7 +75,12 @@ void hd_output_to_game(int x, int y, int *gx, int *gy) {
 static int vx0, vx1, vy0, vy1;   /* original view window (inclusive) */
 static int RX0, RY0, RX1, RY1;   /* hd view rectangle on the output */
 static int wide;                 /* view widened to the full output width */
-static uint32_t *view_buf;       /* hd view, XRGB, (RX1-RX0) x (RY1-RY0) */
+static int full_hud;             /* gothic HUD: the view fills the output, the status bar is replaced */
+static double view_shift;        /* full_hud: projection moved down to centre the horizon (output pixels) */
+static double weapon_drop;       /* full_hud: the weapon moved down to the bottom edge (output pixels) */
+static uint32_t *view_buf;       /* hd view, XRGB, (RX1-RX0+2*view_m) x (RY1-RY0+2*view_m) */
+static int VM;                   /* overscan the view is allocated with, so it can be rolled (pixels per side) */
+static int view_m;               /* overscan of the view last drawn */
 static size_t view_cap;
 static float *zbuf;
 static int *col_vec;
@@ -140,6 +146,7 @@ static const uint8_t *tex_get(uint16_t entry, uint32_t size) {
 typedef struct {
     double px, py, c, s, f, hs; /* player, cos/sin, focal, height scale */
     double cx_hi, hor_hi, wall_mid_hi; /* projection centre on the hd view buffer */
+    double eye;                        /* view bob: eye raised by this many world units */
     int bw, bh;
 } cam_t;
 
@@ -302,6 +309,57 @@ static void obj_coords(uint32_t o, int idx, double *x, double *y) {
 /* the game is drawing the 3D view (a game frame within the last 150 ms) */
 int hd_view_live(void) { return frame_valid && out_w && sp_cur->valid && host_time_us() - sp_cur->t < 150000; }
 
+/* Quake-style view bob (cl_bob / cl_bobcycle / cl_bobup): while the player
+ * moves, the eye rises and falls with a 0.6 s cycle (half up, half down),
+ * by 0.3 + 0.7 sin of the phase times an amount proportional to the speed;
+ * the weapon follows it and sways sideways at half that rate. Speed comes
+ * from the last two game frames, eased so starting and stopping glide. */
+double hd_bob_scale = 1.0;
+static double bob_speed, bob_eye, bob_wx, bob_wy; /* units/s; world units; 320x200 pixels */
+/* Quake-style roll (cl_rollangle / cl_rollspeed): the view leans into
+ * sideways motion, full angle at walking speed and above. */
+double hd_roll_angle = 2.0;      /* degrees */
+#define ROLL_SPEED 250.0          /* units/s for the full angle (walking) */
+static double roll_side, view_roll; /* eased sideways speed (units/s, + right); degrees, + leaning right */
+static uint64_t bob_t;
+#define BOB_CYCLE 0.6
+#define BOB_UP 0.5
+#define BOB_PER_SPEED 0.008 /* world units of bob per unit/s: walking (250/s) bobs 2 units */
+#define BOB_MAX 3.0
+#define BOB_PI 3.14159265358979323846
+
+static void update_bob(void) {
+    uint64_t now = host_time_us();
+    double dt = bob_t && now > bob_t ? (now - bob_t) / 1e6 : 0;
+    bob_t = now;
+    if (dt > 0.25) dt = 0.25;
+    double target = 0;
+    if (!exact_camera && sp_cur->valid && sp_prev->valid && sp_cur->t > sp_prev->t && now - sp_cur->t < 120000) {
+        double dx = sp_cur->px - sp_prev->px, dy = sp_cur->py - sp_prev->py;
+        target = sqrt(dx * dx + dy * dy) / ((sp_cur->t - sp_prev->t) / 1e6);
+        if (target > 2000) target = 0; /* teleport */
+    }
+    double side = 0;
+    if (target > 0) { /* sideways part: lateral axis of to_cam, (cos a, sin a) with y south */
+        double a = ds16(0x4bda) * (BOB_PI / 180.0), dx = sp_cur->px - sp_prev->px, dy = sp_cur->py - sp_prev->py;
+        side = (dx * cos(a) + dy * sin(a)) / ((sp_cur->t - sp_prev->t) / 1e6);
+    }
+    int playing = ds8(0x46a4) == 1;
+    if (!playing) target = side = 0;
+    bob_speed += (target - bob_speed) * (1 - exp(-dt / 0.12));
+    roll_side += (side - roll_side) * (1 - exp(-dt / 0.12));
+    view_roll = fabs(roll_side) < ROLL_SPEED ? roll_side * hd_roll_angle / ROLL_SPEED : (roll_side < 0 ? -hd_roll_angle : hd_roll_angle);
+    double amp = bob_speed * BOB_PER_SPEED;
+    if (amp > BOB_MAX) amp = BOB_MAX;
+    amp *= hd_bob_scale;
+    double t = now / 1e6, cyc = fmod(t, BOB_CYCLE) / BOB_CYCLE;
+    double ph = cyc < BOB_UP ? BOB_PI * cyc / BOB_UP : BOB_PI + BOB_PI * (cyc - BOB_UP) / (1 - BOB_UP);
+    double b = amp * (0.3 + 0.7 * sin(ph));
+    bob_eye = b;
+    bob_wy = (amp - b) * 3.0;                               /* lowest when the eye is lowest, never above its rest */
+    bob_wx = amp * 2.5 * cos(BOB_PI * (t / BOB_CYCLE - 0.25)); /* out to the sides at the top of each step */
+}
+
 static void project_setup(cam_t *cam) {
     cam->px = ds16(0x4be6);
     cam->py = ds16(0x4be8);
@@ -328,10 +386,17 @@ static void project_setup(cam_t *cam) {
     cam->hs = ds32(0x3a64);
     int cx = ds16(0x53dc), hor = ds16(0x53de);
     cam->cx_hi = ox + (cx + 0.5) * kx - RX0;
-    cam->hor_hi = oy + hor * ky - RY0;          /* first floor row */
-    cam->wall_mid_hi = oy + (hor + 0.5) * ky - RY0;
-    cam->bw = RX1 - RX0;
-    cam->bh = RY1 - RY0;
+    double shift = exact_camera ? 0 : view_shift;
+    cam->hor_hi = oy + hor * ky - RY0 + shift;  /* first floor row */
+    cam->wall_mid_hi = oy + (hor + 0.5) * ky - RY0 + shift;
+    cam->eye = exact_camera ? 0 : bob_eye;
+    int m = exact_camera ? 0 : VM;
+    view_m = m;
+    cam->cx_hi += m;
+    cam->hor_hi += m;
+    cam->wall_mid_hi += m;
+    cam->bw = RX1 - RX0 + 2 * m;
+    cam->bh = RY1 - RY0 + 2 * m;
 }
 
 static inline void to_cam(const cam_t *cam, double X, double Y, double *a, double *l) {
@@ -351,8 +416,9 @@ static void draw_wall_columns(void *ctx, int x0, int x1) {
         if (col_vec[x] < 0 || !t) continue;
         double a = zbuf[x];
         double half = (cam->hs / (16.0 * a) + 0.5) * ky;
-        double top = cam->wall_mid_hi - half;
-        int y0 = (int)ceil(top - 0.5), y1 = (int)ceil(cam->wall_mid_hi + half - 0.5);
+        double mid = cam->wall_mid_hi + cam->eye * cam->hs / (16.0 * a) / 32.0 * ky; /* walls are 64 units high */
+        double top = mid - half;
+        int y0 = (int)ceil(top - 0.5), y1 = (int)ceil(mid + half - 0.5);
         if (y0 < 0) y0 = 0;
         if (y1 > bh) y1 = bh;
         float step = (float)(64.0 / (2.0 * half));
@@ -638,7 +704,7 @@ static void render_sprites(const cam_t *cam) {
         if (!pix) continue;
         double hh = cam->hs / (16.0 * a);   /* rows from horizon to the floor at this depth */
         double texel = hh / 32.0;           /* rows (and columns) per texel */
-        double bottom = cam->hor_hi + (hh + 1.0) * ky;
+        double bottom = cam->hor_hi + (hh + 1.0 + cam->eye * hh / 32.0) * ky;
         if (raise > 0) bottom -= (raise * hh / 32.0 + 1.0) * ky;
         double height = sh * texel * ky, width = sw * texel * kx;
         double top = bottom - height;
@@ -748,10 +814,20 @@ void hd_view_drawn(void) {
     RX1 = wide ? out_w : (int)lround(ox + (vx1 + 1) * kx);
     RY0 = (int)lround(oy + (wide ? 0 : vy0) * ky);
     RY1 = (int)lround(oy + (vy1 + 1) * ky);
-    size_t need = (size_t)(RX1 - RX0) * (RY1 - RY0);
+    full_hud = wide && hud_active();
+    view_shift = weapon_drop = 0;
+    if (full_hud) {
+        weapon_drop = out_h - RY1;
+        view_shift = (out_h - RY1 - RY0) * 0.5;
+        RY0 = 0;
+        RY1 = out_h;
+    }
+    /* overscan: the corners a rolled view turns in from outside */
+    VM = hd_roll_angle != 0 ? (int)ceil(sin(fabs(hd_roll_angle) * (BOB_PI / 180.0)) * ((RX1 - RX0) + (RY1 - RY0)) * 0.5) + 2 : 0;
+    size_t need = (size_t)(RX1 - RX0 + 2 * VM) * (RY1 - RY0 + 2 * VM);
     if (need > view_cap) { free(view_buf); view_buf = malloc(need * sizeof *view_buf); view_cap = need; }
-    if ((size_t)(RX1 - RX0) > col_cap) {
-        col_cap = (size_t)(RX1 - RX0);
+    if ((size_t)(RX1 - RX0 + 2 * VM) > col_cap) {
+        col_cap = (size_t)(RX1 - RX0 + 2 * VM);
         free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax);
         zbuf = malloc(col_cap * sizeof *zbuf);
         col_vec = malloc(col_cap * sizeof *col_vec);
@@ -828,6 +904,7 @@ int hd_rerender(void) {
         for (int i = 0; i < 256; i++) host_get_palette_entry(i, &pal[i][0], &pal[i][1], &pal[i][2]);
         view_pal_hash = palette_hash((const uint8_t(*)[3])pal);
     }
+    update_bob();
     cam_t cam;
     project_setup(&cam);
     if (getenv("N3D_TURNLOG")) fprintf(stderr, "cam %llu %.2f %.2f %.2f\n", (unsigned long long)host_time_us(), cam.px, cam.py, atan2(cam.c, cam.s) * 57.2957795);
@@ -851,6 +928,7 @@ int hd_rerender(void) {
 }
 
 int hd_layer_current(void) { return frame_valid ? layer_anchor : 0; }
+int hd_full_hud(void) { return frame_valid && full_hud; }
 
 void hd_overlays_done(void) {
     uint8_t *d = dib();
@@ -922,16 +1000,45 @@ static const hd_pack_img *pick_wide(const hd_pack_img *ui) {
     return fit ? fit : narrowest;
 }
 
+/* bilinear XRGB sample of the overscanned view at (x, y) in its own pixels */
+static inline uint32_t view_sample(double x, double y, int vw, int vh) {
+    x -= 0.5; y -= 0.5;
+    int x0 = (int)floor(x), y0 = (int)floor(y);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x0 > vw - 2) x0 = vw - 2;
+    if (y0 > vh - 2) y0 = vh - 2;
+    uint32_t fx = (uint32_t)lround((x - x0 < 0 ? 0 : x - x0 > 1 ? 1 : x - x0) * 256);
+    uint32_t fy = (uint32_t)lround((y - y0 < 0 ? 0 : y - y0 > 1 ? 1 : y - y0) * 256);
+    const uint32_t *p = view_buf + (size_t)y0 * vw + x0;
+    uint32_t a = p[0], b = p[1], c = p[vw], d = p[vw + 1], r = 0xff000000u;
+    for (int sh = 0; sh < 24; sh += 8) {
+        uint32_t t = ((a >> sh & 255) * (256 - fx) + (b >> sh & 255) * fx) * (256 - fy) + ((c >> sh & 255) * (256 - fx) + (d >> sh & 255) * fx) * fy;
+        r |= (t >> 16) << sh;
+    }
+    return r;
+}
+
 static void compose_rows(void *ctx, int y0, int y1) {
     const compose_job_t *j = ctx;
-    int vw = RX1 - RX0;
+    int m = view_m, vw = RX1 - RX0 + 2 * m, vh = RY1 - RY0 + 2 * m;
+    /* view roll: turn the view about its centre (the world leans the other way) */
+    double ra = view_roll * (BOB_PI / 180.0), rc = cos(ra), rs = sin(ra);
+    int rolled = fabs(view_roll) > 0.01 && m > 0;
+    double ccx = (RX1 - RX0) * 0.5, ccy = (RY1 - RY0) * 0.5;
     for (int y = y0; y < y1; y++) {
         uint32_t *row = j->out + (size_t)y * j->pitch;
         int gy = j->ymap[y];
         int view = j->use_hd && y >= RY0 && y < RY1;
         int xs = view ? RX0 : out_w, xe = view ? RX1 : out_w;
         for (int x = 0; x < xs; x++) row[x] = frame_px(j, x, y, gy);
-        if (view) memcpy(row + RX0, view_buf + (size_t)(y - RY0) * vw, sizeof(uint32_t) * (size_t)vw);
+        if (view && rolled) {
+            double dy = y - RY0 + 0.5 - ccy;
+            for (int x = RX0; x < RX1; x++) {
+                double dx = x - RX0 + 0.5 - ccx;
+                row[x] = view_sample(dx * rc - dy * rs + ccx + m, dx * rs + dy * rc + ccy + m, vw, vh);
+            }
+        } else if (view) memcpy(row + RX0, view_buf + (size_t)(y - RY0 + m) * vw + m, sizeof(uint32_t) * (size_t)(RX1 - RX0));
         for (int x = xe; x < out_w; x++) row[x] = frame_px(j, x, y, gy);
     }
 }
@@ -1011,8 +1118,9 @@ void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, 
     if (!use_hd) return;
     refresh_palette();
     /* overlays, each anchored to the matching part of the widened view */
-    double shift[4] = {0, 0, RX0 - (ox + vx0 * kx), RX1 - (ox + (vx1 + 1) * kx)};
-    for (int an = 1; an <= 3; an++) {
+    double shift[5] = {0, 0, RX0 - (ox + vx0 * kx), RX1 - (ox + (vx1 + 1) * kx), bob_wx * kx};
+    double shift_y[5] = {0, 0, 0, 0, weapon_drop + bob_wy * ky};
+    for (int an = 1; an <= 4; an++) {
         int bx0 = 320, by0 = 200, bx1 = -1, by1 = -1;
         for (int y = vy0; y <= vy1; y++)
             for (int x = vx0; x <= vx1; x++)
@@ -1044,15 +1152,16 @@ void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, 
         hq_build_pending();
         lj.bx0 = bx0; lj.by0 = by0; lj.bw = bw; lj.bh = bh;
         lj.X0 = ox + bx0 * kx + shift[an];
-        lj.Y0 = oy + by0 * ky;
+        lj.Y0 = oy + by0 * ky + shift_y[an];
         lj.xa = (int)lround(lj.X0); lj.xb = (int)lround(lj.X0 + bw * kx);
         lj.ya = (int)lround(lj.Y0); lj.yb = (int)lround(lj.Y0 + bh * ky);
         if (lj.xa < 0) lj.xa = 0;
         if (lj.xb > out_w) lj.xb = out_w;
         if (lj.ya < 0) lj.ya = 0;
-        if (lj.yb > out_h) lj.yb = out_h;
+        if (lj.yb > RY1) lj.yb = RY1; /* the bobbing weapon stays inside the view */
         lj.out = out;
         lj.pitch = pitch;
         if (lj.xb > lj.xa) hq_parallel(draw_layer_columns, &lj, lj.xb - lj.xa);
     }
+    if (full_hud) hud_draw(out, pitch, out_w, out_h);
 }
