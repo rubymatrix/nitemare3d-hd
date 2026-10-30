@@ -38,11 +38,29 @@ Requirements: CMake ≥ 3.16, a C99 compiler, SDL2 development files.
 | --- | --- | --- |
 | macOS | `brew install sdl2 cmake` | `cmake -S . -B build && cmake --build build -j` |
 | Linux (Debian/Ubuntu) | `sudo apt install libsdl2-dev cmake gcc` | same |
-| Windows (MSVC) | `vcpkg install sdl2` | `cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake && cmake --build build --config Release` |
+| Windows (Visual Studio 2022 or later) | nothing: CMake downloads SDL2's official package (or uses vcpkg's if you pass its toolchain file) | `cmake --preset windows && cmake --build --preset windows` |
 | Windows (MinGW cross from Linux) | SDL2 `-mingw` dev package | `cmake -S . -B build -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc -DSDL2_DIR=<sdl>/x86_64-w64-mingw32/lib/cmake/SDL2` |
 
-The build needs the generated sources in `src/gen/`, which are not in the repository (see below). On Windows,
-put `SDL2.dll` next to `nitemare3d.exe`.
+The build needs the generated sources in `src/gen/`, which are not in the repository (see below). On Windows
+the build copies `SDL2.dll` next to `nitemare3d.exe` (`build/Release/` with the preset), so the game runs from there.
+
+### Windows
+
+Install Visual Studio 2022 or later with the "Desktop development with C++"
+workload; it includes CMake. From a Developer PowerShell:
+
+```powershell
+python tools\extract_installer.py C:\path\to\win3_Nite3d3x.zip original
+$env:GHIDRA_INSTALL_DIR = 'C:\path\to\ghidra_12.0_PUBLIC'
+$env:JAVA_HOME = 'C:\path\to\jdk-21'
+powershell -ExecutionPolicy Bypass -File tools\build_gen.ps1
+cmake --preset windows
+cmake --build --preset windows
+build\Release\nitemare3d.exe --data original\data
+```
+
+Windows builds draw with Direct3D 12 (`src/video_d3d12.c`); see "Video
+backends" below.
 
 ## Game data
 
@@ -65,6 +83,8 @@ Needs Ghidra 12.x and a JDK 21 (`brew install ghidra openjdk@21`):
 ```bash
 GHIDRA_INSTALL_DIR=/opt/homebrew/opt/ghidra/libexec JAVA_HOME=/opt/homebrew/opt/openjdk@21 tools/build_gen.sh
 ```
+
+On Windows, `tools/build_gen.ps1` runs the same steps without a Unix shell.
 
 Pipeline: `tools/redecomp.sh` (Ghidra headless: `FindMissingFuncs.java`,
 `ApplyNames.java`, `ExportDecomp.java`, `ExportAsm.java`, `ExportRecomp.java`)
@@ -106,6 +126,7 @@ Windows had. Two backends are provided:
 
 ```
 src/host_sdl.c        SDL2 shell: window, input, gamepad, audio, main loop (desktop and browser)
+src/video_*.c         video backends: SDL_Renderer, Direct3D 12 (Windows)
 web/                  page shell for the WebAssembly build
 src/music.c           MIDI sequencer -> SoundFont or OPL2; pre-rendered tune playback
 src/dls.c             DLS (gm.dls) -> SoundFont conversion
@@ -164,11 +185,34 @@ switch away.
 | `--classic` (= `--res 320x200`) | the original frame only, shown at 4:3 |
 | `--fps N` | hi-res frame rate during play (default `0` = one frame per display refresh, vsync-paced; a fixed rate that doesn't divide the refresh rate judders) |
 | `--no-spaces` | macOS: fullscreen without a separate Space; fixes a horizontal tear in fullscreen on some displays |
-| `--renderer metal\|opengl` | SDL render backend (default: SDL's choice) |
+| `--renderer d3d12\|direct3d11\|metal\|opengl` | video backend: `d3d12` (Windows default) or one of SDL's render backends (default elsewhere: SDL's choice) |
+| `--no-vsync` | don't wait for the display refresh; with `d3d12` frames are shown with tearing allowed, so variable refresh rate (G-SYNC / FreeSync) displays follow the game |
 | `--filter nearest\|bilinear\|trilinear\|aniso` | texture filtering (default `aniso`) |
 | `--aniso N` | anisotropic taps, 1–16 (default 16) |
 | `--upscale none\|scale2x\|scale3x\|scale4x\|scale6x` | pixel-art upscaling of textures and sprites (default `scale4x`) |
 | `--texture-quality off\|high` | `off` = nearest + no upscaling (the original texels), `high` = aniso 16 + scale4x |
+
+### Video backends
+
+The game and the hi-res renderer draw on the CPU; a video backend
+(`src/video.h`) only puts each finished frame in the window, scaled with
+nearest-neighbour and letterboxed.
+
+* **SDL** (`src/video_sdl.c`): an SDL_Renderer streaming texture. Used on
+  macOS, Linux and in the browser, and on Windows with `--renderer direct3d11`
+  (or `opengl`, ...).
+* **Direct3D 12** (`src/video_d3d12.c`, Windows; CMake option `N3D_D3D12`,
+  on by default): the frame goes through an upload buffer into a texture that
+  a full-screen triangle draws into a flip-model swap chain. A frame latency
+  waitable object keeps one frame in flight, so input reaches the screen a
+  frame sooner than with a deeper queue. Borderless fullscreen (Alt+Enter)
+  gets independent flip. `d3d12.dll`, `dxgi.dll` and `d3dcompiler_47.dll` are
+  loaded at run time; without them the game falls back to SDL's renderer.
+  Some virtual and remote-desktop displays don't hold flip-model presents to
+  the refresh rate; when presents run far faster than the display, the
+  backend paces with `WaitForVBlank` instead. `N3D_DEBUG=1` prints the
+  adapter, tearing support and when that fallback is used;
+  `N3D_D3D12_DEBUG=1` turns on the Direct3D 12 debug layer.
 
 How it works (`src/hd.c`, hooks in `src/rt/overrides.c`):
 
