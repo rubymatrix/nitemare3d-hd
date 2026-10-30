@@ -1183,6 +1183,11 @@ int main(int argc, char **argv) {
     if (scale < 1) scale = 1;
     if (hd_pack) hd_pack_load(hd_pack);
     hud_set_enabled(hud_on);
+#ifdef _WIN32
+    /* HiDPI on Windows: per-monitor DPI aware, window sizes in scaled units
+     * like macOS, drawable size in device pixels */
+    if (hidpi) SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "1");
+#endif
 
 #ifdef __EMSCRIPTEN__
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {

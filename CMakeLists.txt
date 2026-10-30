@@ -12,7 +12,30 @@ if(EMSCRIPTEN)
   option(N3D_WASM_THREADS "Use Web Workers for the hi-res renderer (needs a cross-origin isolated page)" OFF)
   set(N3D_WASM_DATA "" CACHE PATH "Game data folder to bundle into the build (private builds only; default: the page asks for the files)")
 else()
-  find_package(SDL2 REQUIRED)
+  find_package(SDL2 QUIET)
+  if(NOT SDL2_FOUND AND WIN32)
+    # Native Windows build without vcpkg: use SDL's official development package.
+    include(FetchContent)
+    if(POLICY CMP0135)
+      cmake_policy(SET CMP0135 NEW)
+    endif()
+    if(MSVC)
+      FetchContent_Declare(sdl2_devel
+        URL https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-VC.zip
+        URL_HASH SHA256=af347939395a58b365846aaea27391e69f9ec9d4dd650d6ac40802159b418a6e)
+      FetchContent_MakeAvailable(sdl2_devel)
+      set(SDL2_DIR ${sdl2_devel_SOURCE_DIR}/cmake)
+    else()
+      FetchContent_Declare(sdl2_devel
+        URL https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.zip
+        URL_HASH SHA256=f15cff5fca62ec9381a016ef1d42a95c638cd72d2f226ba5781c76fe43dbd1ac)
+      FetchContent_MakeAvailable(sdl2_devel)
+      set(SDL2_DIR ${sdl2_devel_SOURCE_DIR}/x86_64-w64-mingw32/lib/cmake/SDL2)
+    endif()
+    find_package(SDL2 REQUIRED CONFIG)
+  elseif(NOT SDL2_FOUND)
+    find_package(SDL2 REQUIRED)
+  endif()
   find_package(Threads)
 endif()
 
@@ -106,6 +129,12 @@ if(N3D_D3D12)
   target_sources(nitemare3d PRIVATE src/video_d3d12.c)
   target_compile_definitions(nitemare3d PRIVATE N3D_D3D12)
   target_link_libraries(nitemare3d PRIVATE dxguid)
+endif()
+
+if(WIN32 AND TARGET SDL2::SDL2)
+  # the game runs straight from the build folder
+  add_custom_command(TARGET nitemare3d POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:nitemare3d>)
 endif()
 
 if(NOT MSVC)
