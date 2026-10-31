@@ -401,8 +401,14 @@ static int d3d12_set_source(int w, int h, int lw, int lh) {
 
     UINT64 total = 0;
     ID3D12Device_GetCopyableFootprints(device, &td, 0, 1, 0, &footprint, NULL, NULL, &total);
+    /* The frame is composed in place, and compositing reads back what it drew
+     * (overlays, the HUD), so the buffer has to be CPU-cached. An UPLOAD heap is
+     * write-combined, where every read stalls; a custom write-back heap in
+     * system memory is cached, and the GPU still copies from it directly. */
     D3D12_HEAP_PROPERTIES up = {0};
-    up.Type = D3D12_HEAP_TYPE_UPLOAD;
+    up.Type = D3D12_HEAP_TYPE_CUSTOM;
+    up.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+    up.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
     D3D12_RESOURCE_DESC bd = {0};
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     bd.Width = total;
@@ -412,11 +418,17 @@ static int d3d12_set_source(int w, int h, int lw, int lh) {
     bd.SampleDesc.Count = 1;
     bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     for (int i = 0; i < FRAMES; i++) {
-        if (failed(ID3D12Device_CreateCommittedResource(device, &up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&upload[i]), "CreateCommittedResource")) return -1;
-        D3D12_RANGE none = {0, 0}; /* the CPU never reads it */
-        if (failed(ID3D12Resource_Map(upload[i], 0, &none, (void **)&upload_ptr[i]), "Map")) return -1;
+        HRESULT hr = ID3D12Device_CreateCommittedResource(device, &up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&upload[i]);
+        if (FAILED(hr) && up.Type == D3D12_HEAP_TYPE_CUSTOM) { /* fall back to a plain upload heap */
+            memset(&up, 0, sizeof up);
+            up.Type = D3D12_HEAP_TYPE_UPLOAD;
+            hr = ID3D12Device_CreateCommittedResource(device, &up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&upload[i]);
+        }
+        if (failed(hr, "CreateCommittedResource")) return -1;
+        if (failed(ID3D12Resource_Map(upload[i], 0, NULL, (void **)&upload_ptr[i]), "Map")) return -1;
         memset(upload_ptr[i], 0, (size_t)total);
     }
+    if (getenv("N3D_DEBUG")) fprintf(stderr, "d3d12: %dx%d frame buffer in %s memory\n", w, h, up.Type == D3D12_HEAP_TYPE_CUSTOM ? "cached system" : "upload");
     src_w = w;
     src_h = h;
     src_written = 0;
