@@ -81,7 +81,9 @@ static int pace_frames;
 
 static const char shader_src[] =
     "Texture2D t : register(t0);\n"
-    "SamplerState s : register(s0);\n"
+    "SamplerState sharp : register(s0);\n"
+    "SamplerState smooth : register(s1);\n"
+    "cbuffer C : register(b0) { uint linear_filter; };\n"
     "struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
     "V vs(uint id : SV_VertexID) {\n"
     "    V o;\n"
@@ -89,7 +91,9 @@ static const char shader_src[] =
     "    o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);\n"
     "    return o;\n"
     "}\n"
-    "float4 ps(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n";
+    "float4 ps(V i) : SV_Target {\n"
+    "    return float4((linear_filter ? t.Sample(smooth, i.uv) : t.Sample(sharp, i.uv)).rgb, 1);\n"
+    "}\n";
 
 static int failed(HRESULT hr, const char *what) {
     if (SUCCEEDED(hr)) return 0;
@@ -196,17 +200,25 @@ static int fit_swapchain(void) {
 
 static int create_pipeline(void) {
     D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
-    D3D12_ROOT_PARAMETER param = {0};
-    param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    param.DescriptorTable.NumDescriptorRanges = 1;
-    param.DescriptorTable.pDescriptorRanges = &range;
-    param.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_STATIC_SAMPLER_DESC samp = {0};
-    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT; /* sharp pixels, like SDL's "nearest" scale quality */
-    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samp.MaxLOD = D3D12_FLOAT32_MAX;
-    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_ROOT_SIGNATURE_DESC rs = {1, &param, 1, &samp, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    D3D12_ROOT_PARAMETER param[2] = {0};
+    param[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    param[0].DescriptorTable.NumDescriptorRanges = 1;
+    param[0].DescriptorTable.pDescriptorRanges = &range;
+    param[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    param[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; /* linear_filter */
+    param[1].Constants.Num32BitValues = 1;
+    param[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    /* sharp pixels for the 320x200 frame (SDL's "nearest"), bilinear for a
+     * hi-res frame drawn smaller than the window (--render-scale) */
+    D3D12_STATIC_SAMPLER_DESC samp[2] = {0};
+    for (int i = 0; i < 2; i++) {
+        samp[i].Filter = i ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT;
+        samp[i].AddressU = samp[i].AddressV = samp[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samp[i].MaxLOD = D3D12_FLOAT32_MAX;
+        samp[i].ShaderRegister = (UINT)i;
+        samp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+    D3D12_ROOT_SIGNATURE_DESC rs = {2, param, 2, samp, D3D12_ROOT_SIGNATURE_FLAG_NONE};
     ID3DBlob *blob = NULL, *err = NULL, *vs = NULL, *ps = NULL;
     HRESULT hr = p_D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err);
     if (failed(hr, "D3D12SerializeRootSignature")) goto out;
@@ -544,6 +556,10 @@ static void d3d12_present(void) {
     D3D12_GPU_DESCRIPTOR_HANDLE srv;
     gpu_start(srv_heap, &srv);
     ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cmd, 0, srv);
+    /* bilinear only for a hi-res frame being enlarged; the 320x200 frame
+     * (logical size differs from its own) keeps its sharp pixels */
+    UINT smooth = logical_w == src_w && logical_h == src_h && scale > 1.0f;
+    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstant(cmd, 1, smooth, 0);
     ID3D12GraphicsCommandList_IASetPrimitiveTopology(cmd, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D12GraphicsCommandList_DrawInstanced(cmd, 3, 1, 0, 0);
     barrier(backbuf[bb], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);

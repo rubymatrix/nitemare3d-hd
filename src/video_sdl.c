@@ -37,6 +37,11 @@ static int sdl_output_size(int *w, int *h) { return SDL_GetRendererOutputSize(re
 static int sdl_set_source(int w, int h, int logical_w, int logical_h) {
     if (texture) SDL_DestroyTexture(texture);
     texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    /* a hi-res frame drawn smaller than the window (--render-scale) is
+     * enlarged smoothly; the 320x200 frame keeps its sharp pixels */
+    if (texture && logical_w == w && logical_h == h) SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
+#endif
     SDL_RenderSetLogicalSize(renderer, logical_w, logical_h);
     return texture ? 0 : -1;
 }
