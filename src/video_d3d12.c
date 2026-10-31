@@ -556,6 +556,18 @@ static void d3d12_present(void) {
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
         fprintf(stderr, "d3d12: device lost (0x%08lx)\n", (unsigned long)ID3D12Device_GetDeviceRemovedReason(device));
     if (use_vsync) check_pacing();
+    if (getenv("N3D_HDPROF")) { /* presented frame rate and the worst frame of each 120 */
+        static Uint64 t0, last, worst;
+        static int n;
+        Uint64 now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
+        if (last && now - last > worst) worst = now - last;
+        if (!t0) t0 = now;
+        last = now;
+        if (++n == 120) {
+            fprintf(stderr, "d3d12: %.1f fps, worst frame %.1f ms\n", 120.0 * f / (now - t0), worst * 1000.0 / f);
+            n = 0; t0 = now; worst = 0;
+        }
+    }
     fence_done[frame] = fence_next++;
     ID3D12CommandQueue_Signal(queue, fence, fence_done[frame]);
     frame = (frame + 1) % FRAMES;
