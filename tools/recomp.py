@@ -206,12 +206,18 @@ class FnGen:
             return 'SX%d(%s)' % (sz(v) * 8, R(v))
         if m == 'COPY':
             return self.wr(outv, R(ins_[0]))
+        def A(v):  # memory address
+            # Some Ghidra versions (11.x) give the 32-bit PUSH imm8 (66 6A) a flat
+            # [ESP] store in 16-bit code; the stack is always SS:SP here.
+            if v == ['register', 0x10, 4] or v == ('register', 0x10, 4):
+                return 'SEGLIN(RG16(0x104), RG16(0x10))'
+            return R(v)
         if m == 'LOAD':
             size = outv[2]
-            return self.wr(outv, 'MEMR%d(%s)' % (size * 8, R(ins_[1])))
+            return self.wr(outv, 'MEMR%d(%s)' % (size * 8, A(ins_[1])))
         if m == 'STORE':
             size = ins_[2][2]
-            return 'MEMW%d(%s, %s);' % (size * 8, R(ins_[1]), R(ins_[2]))
+            return 'MEMW%d(%s, %s);' % (size * 8, A(ins_[1]), R(ins_[2]))
         bin_ops = {
             'INT_ADD': '+', 'INT_SUB': '-', 'INT_MULT': '*', 'INT_AND': '&', 'INT_OR': '|', 'INT_XOR': '^',
             'BOOL_AND': '&', 'BOOL_OR': '|', 'BOOL_XOR': '^',
