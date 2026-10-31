@@ -1193,6 +1193,18 @@ int main(int argc, char **argv) {
         } else { usage(argv[0]); return 1; }
     }
     if (scale < 1) scale = 1;
+#ifndef __EMSCRIPTEN__
+    char hd_pack_path[1200];
+    if (!hd_pack) { /* an hdpack folder next to the program, like hud.pak */
+        char *base = SDL_GetBasePath();
+        snprintf(hd_pack_path, sizeof hd_pack_path, "%shdpack", base ? base : "");
+        SDL_free(base);
+        FILE *idx;
+        char probe[1300];
+        snprintf(probe, sizeof probe, "%s/index.txt", hd_pack_path);
+        if ((idx = fopen(probe, "r"))) { fclose(idx); hd_pack = hd_pack_path; }
+    }
+#endif
     if (hd_pack) hd_pack_load(hd_pack);
     hud_set_enabled(hud_on);
 #ifdef _WIN32
