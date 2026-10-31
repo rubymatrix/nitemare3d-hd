@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Native high-resolution renderer for Nitemare-3D's 3D view (see hd.h).
  *
  * World data used (all owned and updated by the original code):
@@ -419,7 +419,41 @@ static inline void to_cam(const cam_t *cam, double X, double Y, double *a, doubl
     *l = dx * cam->s - dy * cam->c;
 }
 
-typedef struct { const cam_t *cam; } wall_job_t;
+typedef struct { const cam_t *cam; uint32_t cc, fc; } wall_job_t;
+
+/* Ceiling and floor colour at each light level, for the frame being drawn. */
+static uint32_t lit_cc[LIGHT_LUT_N], lit_fc[LIGHT_LUT_N];
+
+static inline int light_index(float L) {
+    int i = (int)(L * LIGHT_LUT_STEPS + 0.5f);
+    return i < 0 ? 0 : i >= LIGHT_LUT_N ? LIGHT_LUT_N - 1 : i;
+}
+
+/* Floor or ceiling rows [ya, yb) of a column: the flat colour at the light
+ * under each pixel (lit[], or plain where the row shows no floor). The light
+ * map is smooth (4-unit cells), so it is looked up every LIGHT_ROW_STEP rows
+ * and blended in between. */
+#define LIGHT_ROW_STEP 4
+static void flat_span_lit(const cam_t *cam, uint32_t *col, int ya, int yb, double wx, double wy, int layer,
+                          const uint32_t *lit, uint32_t plain) {
+    size_t bw = (size_t)cam->bw;
+    float carry = 0; /* light at y, when the previous run ended there */
+    int have = 0;
+    for (int y = ya; y < yb;) {
+        if (row_a[y] <= 0) { col[y * bw] = plain; y++; have = 0; continue; }
+        int e = y + LIGHT_ROW_STEP < yb - 1 ? y + LIGHT_ROW_STEP : yb - 1;
+        while (e > y && row_a[e] <= 0) e--;
+        float l0 = have ? carry : light_at(cam->px + row_a[y] * wx, cam->py - row_a[y] * wy, layer);
+        float l1 = e > y ? light_at(cam->px + row_a[e] * wx, cam->py - row_a[e] * wy, layer) : l0;
+        /* rows y..e-1 blend toward e's light; e starts the next run unless it ends the span */
+        int last = e > y && e < yb - 1 ? e - 1 : e;
+        float dl = e > y ? (l1 - l0) / (float)(e - y) : 0;
+        for (int k = 0; y + k <= last; k++) col[(y + k) * bw] = lit[light_index(l0 + dl * (float)k)];
+        have = last == e - 1;
+        carry = l1;
+        y = last + 1;
+    }
+}
 
 /* draw wall columns [x0, x1): runs on worker threads */
 static void draw_wall_columns(void *ctx, int x0, int x1) {
@@ -429,8 +463,10 @@ static void draw_wall_columns(void *ctx, int x0, int x1) {
     if (split < 0) split = 0;
     if (split > bh) split = bh;
     double n2 = cam->c * cam->c + cam->s * cam->s, kf = cam->f * kx;
+    uint32_t cc = ((wall_job_t *)ctx)->cc, fc = ((wall_job_t *)ctx)->fc;
     for (int x = x0; x < x1; x++) {
         const hq_tex *t = col_tex[x];
+        uint32_t *col = view_buf + x;
         int y0 = split, y1 = split;
         if (col_vec[x] >= 0 && t) {
             double a = zbuf[x];
@@ -443,31 +479,32 @@ static void draw_wall_columns(void *ctx, int x0, int x1) {
             float step = (float)(64.0 / (2.0 * half));
             float vpos = (float)((y0 + 0.5 - top) * step);
             float u = col_u[x], fu = col_fu[x];
-            if (y1 > y0) hq_column_span(t, u, fu, col_umin[x], col_umax[x], vpos, step, y1 - y0, view_buf + (size_t)y0 * bw + x, bw);
-            if (lighting) { /* height on the wall: 64 at its top, 0 at its foot */
+            if (y1 > y0) hq_column_span(t, u, fu, col_umin[x], col_umax[x], vpos, step, y1 - y0, col + (size_t)y0 * bw, bw);
+            if (lighting) { /* height on the wall: 64 at its top, 0 at its foot, stepped per row */
                 const float *L = col_L + 3 * x;
-                uint32_t *p = view_buf + (size_t)y0 * bw + x;
-                for (int y = y0; y < y1; y++, p += bw) {
-                    float z = (float)(64.0 * (1.0 - (y + 0.5 - top) / (2.0 * half)));
+                uint32_t *p = col + (size_t)y0 * bw;
+                float z = (float)(64.0 * (1.0 - (y0 + 0.5 - top) / (2.0 * half))), dz = (float)(-64.0 / (2.0 * half));
+                for (int y = y0; y < y1; y++, p += bw, z += dz) {
                     float l = z < 32 ? L[0] + (L[1] - L[0]) * (z < 0 ? 0 : z) / 32 : L[1] + (L[2] - L[1]) * ((z > 64 ? 64 : z) - 32) / 32;
                     *p = light_apply(*p, light_scale(l));
                 }
             }
         }
-        if (!lighting) continue;
-        /* floor and ceiling around the wall: the world point under each pixel */
-        double tau = (x + 0.5 - cam->cx_hi) / kf;
-        double wx = (cam->c + cam->s * tau) / n2, wy = (cam->s - cam->c * tau) / n2;
-        for (int y = 0; y < y0 && y < split; y++) {
-            double a = row_a[y];
-            if (a <= 0) continue;
-            view_buf[(size_t)y * bw + x] = light_apply_flat(view_buf[(size_t)y * bw + x], light_scale(light_at(cam->px + a * wx, cam->py - a * wy, 2)));
+        /* The rest of the column is flat colour: ceiling above the horizon,
+         * floor below. Written here, lit as it is written, rather than filled
+         * beforehand and shaded in a second pass. */
+        int ce = y0 < split ? y0 : split, fs = y1 > split ? y1 : split;
+        if (lighting) { /* the world point under each pixel */
+            double tau = (x + 0.5 - cam->cx_hi) / kf;
+            double wx = (cam->c + cam->s * tau) / n2, wy = (cam->s - cam->c * tau) / n2;
+            flat_span_lit(cam, col, 0, ce, wx, wy, 2, lit_cc, cc);
+            flat_span_lit(cam, col, fs, bh, wx, wy, 0, lit_fc, fc);
+        } else {
+            for (int y = 0; y < ce; y++) col[(size_t)y * bw] = cc;
+            for (int y = fs; y < bh; y++) col[(size_t)y * bw] = fc;
         }
-        for (int y = y1 > split ? y1 : split; y < bh; y++) {
-            double a = row_a[y];
-            if (a <= 0) continue;
-            view_buf[(size_t)y * bw + x] = light_apply_flat(view_buf[(size_t)y * bw + x], light_scale(light_at(cam->px + a * wx, cam->py - a * wy, 0)));
-        }
+        for (int y = ce; y < y0; y++) col[(size_t)y * bw] = y < split ? cc : fc; /* between the horizon and a low wall */
+        for (int y = y1; y < fs; y++) col[(size_t)y * bw] = y < split ? cc : fc; /* between a high wall and the horizon */
     }
 }
 
@@ -478,11 +515,14 @@ static void render_walls(const cam_t *cam) {
     int split = (int)lround(cam->hor_hi);
     if (split < 0) split = 0;
     if (split > bh) split = bh;
-    uint32_t cc = hq_palette_color(ceil_c), fc = hq_palette_color(floor_c);
-    for (size_t k = 0, e = (size_t)split * bw; k < e; k++) view_buf[k] = cc;
-    for (size_t k = (size_t)split * bw, e = (size_t)bh * bw; k < e; k++) view_buf[k] = fc;
+    uint32_t cc = hq_palette_color(ceil_c), fc = hq_palette_color(floor_c); /* filled per column in draw_wall_columns */
     for (int x = 0; x < bw; x++) { zbuf[x] = 1e30f; col_vec[x] = -1; }
     if (exact_camera) lighting = 0;
+    if (lighting)
+        for (int i = 0; i < LIGHT_LUT_N; i++) {
+            lit_cc[i] = light_apply_flat(cc, light_lut[i]);
+            lit_fc[i] = light_apply_flat(fc, light_lut[i]);
+        }
     if (lighting) { /* depth of the floor (below the horizon) or ceiling seen on each row */
         if ((size_t)bh > row_cap) { row_cap = (size_t)bh; free(row_a); row_a = malloc(row_cap * sizeof *row_a); }
         for (int y = 0; y < bh; y++) {
@@ -604,7 +644,7 @@ static void render_walls(const cam_t *cam) {
         col_fu[x] = d > 64 ? 1.0f : d;
     }
     hq_build_pending();
-    wall_job_t job = {cam};
+    wall_job_t job = {cam, cc, fc};
     hq_parallel(draw_wall_columns, &job, bw);
 }
 
