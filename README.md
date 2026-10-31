@@ -87,6 +87,13 @@ health bar, the ammo for your weapon, and your keys and items. Walking
 bobs the view and weapon like in Quake, and strafing leans the view a
 little. The HUD art is in `assets/hud/`.
 
+## Lighting
+
+The castle is lit by its own lamps, chandeliers, candles and fires: their
+light falls on the walls, floor, ceiling and monsters around them, walls
+cast shadows, and candle and fire light flickers. Away from any light it
+gets dark, with a faint glow around you.
+
 ## Useful options
 
 | Option | What it does |
@@ -98,6 +105,8 @@ little. The HUD art is in `assets/hud/`.
 | `--hud classic` | the original status bar instead of the new gothic HUD |
 | `--bob 0` | turn off the view and weapon bob while walking |
 | `--roll 0` | turn off the view leaning when you strafe |
+| `--light off` | turn off the lighting (everything evenly lit, as in 1994) |
+| `--ambient 0.5` | make unlit areas brighter (0 to 1, default 0.35) |
 
 Put an option at the end of the play command, for example
 `./build/nitemare3d --data original/data --classic`. Every other option is
