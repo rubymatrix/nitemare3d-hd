@@ -81,6 +81,7 @@ static double weapon_drop;       /* full_hud: the weapon moved down to the botto
 static uint32_t *view_buf;       /* hd view, XRGB, (RX1-RX0+2*view_m) x (RY1-RY0+2*view_m) */
 static int VM;                   /* overscan the view is allocated with, so it can be rolled (pixels per side) */
 static int view_m;               /* overscan of the view last drawn */
+static double view_m_roll;       /* roll (degrees) the view last drawn was overscanned for */
 static size_t view_cap;
 static float *zbuf;
 static int *col_vec;
@@ -390,8 +391,14 @@ static void project_setup(cam_t *cam) {
     cam->hor_hi = oy + hor * ky - RY0 + shift;  /* first floor row */
     cam->wall_mid_hi = oy + (hor + 0.5) * ky - RY0 + shift;
     cam->eye = exact_camera ? 0 : bob_eye;
-    int m = exact_camera ? 0 : VM;
+    /* only as much overscan as this frame's roll turns in: none while level */
+    int m = 0;
+    if (!exact_camera && fabs(view_roll) > 0.01) {
+        m = (int)ceil(sin(fabs(view_roll) * (BOB_PI / 180.0)) * ((RX1 - RX0) + (RY1 - RY0)) * 0.5) + 2;
+        if (m > VM) m = VM;
+    }
     view_m = m;
+    view_m_roll = m ? view_roll : 0;
     cam->cx_hi += m;
     cam->hor_hi += m;
     cam->wall_mid_hi += m;
@@ -1000,31 +1007,12 @@ static const hd_pack_img *pick_wide(const hd_pack_img *ui) {
     return fit ? fit : narrowest;
 }
 
-/* bilinear XRGB sample of the overscanned view at (x, y) in its own pixels */
-static inline uint32_t view_sample(double x, double y, int vw, int vh) {
-    x -= 0.5; y -= 0.5;
-    int x0 = (int)floor(x), y0 = (int)floor(y);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x0 > vw - 2) x0 = vw - 2;
-    if (y0 > vh - 2) y0 = vh - 2;
-    uint32_t fx = (uint32_t)lround((x - x0 < 0 ? 0 : x - x0 > 1 ? 1 : x - x0) * 256);
-    uint32_t fy = (uint32_t)lround((y - y0 < 0 ? 0 : y - y0 > 1 ? 1 : y - y0) * 256);
-    const uint32_t *p = view_buf + (size_t)y0 * vw + x0;
-    uint32_t a = p[0], b = p[1], c = p[vw], d = p[vw + 1], r = 0xff000000u;
-    for (int sh = 0; sh < 24; sh += 8) {
-        uint32_t t = ((a >> sh & 255) * (256 - fx) + (b >> sh & 255) * fx) * (256 - fy) + ((c >> sh & 255) * (256 - fx) + (d >> sh & 255) * fx) * fy;
-        r |= (t >> 16) << sh;
-    }
-    return r;
-}
-
 static void compose_rows(void *ctx, int y0, int y1) {
     const compose_job_t *j = ctx;
     int m = view_m, vw = RX1 - RX0 + 2 * m, vh = RY1 - RY0 + 2 * m;
     /* view roll: turn the view about its centre (the world leans the other way) */
-    double ra = view_roll * (BOB_PI / 180.0), rc = cos(ra), rs = sin(ra);
-    int rolled = fabs(view_roll) > 0.01 && m > 0;
+    double ra = view_m_roll * (BOB_PI / 180.0), rc = cos(ra), rs = sin(ra);
+    int rolled = fabs(view_m_roll) > 0.01 && m > 0;
     double ccx = (RX1 - RX0) * 0.5, ccy = (RY1 - RY0) * 0.5;
     for (int y = y0; y < y1; y++) {
         uint32_t *row = j->out + (size_t)y * j->pitch;
@@ -1033,10 +1021,27 @@ static void compose_rows(void *ctx, int y0, int y1) {
         int xs = view ? RX0 : out_w, xe = view ? RX1 : out_w;
         for (int x = 0; x < xs; x++) row[x] = frame_px(j, x, y, gy);
         if (view && rolled) {
-            double dy = y - RY0 + 0.5 - ccy;
-            for (int x = RX0; x < RX1; x++) {
-                double dx = x - RX0 + 0.5 - ccx;
-                row[x] = view_sample(dx * rc - dy * rs + ccx + m, dx * rs + dy * rc + ccy + m, vw, vh);
+            /* Bilinear sample of the overscanned view, stepped along the row
+             * in 16.16 fixed point: this runs for every view pixel while rolling. */
+            double dy = y - RY0 + 0.5 - ccy, dx = 0.5 - ccx;
+            int64_t u = llround((dx * rc - dy * rs + ccx + m - 0.5) * 65536.0);
+            int64_t v = llround((dx * rs + dy * rc + ccy + m - 0.5) * 65536.0);
+            int64_t du = llround(rc * 65536.0), dv = llround(rs * 65536.0);
+            for (int x = RX0; x < RX1; x++, u += du, v += dv) {
+                int x0 = (int)(u >> 16), y0 = (int)(v >> 16);
+                uint32_t fx = (uint32_t)(u >> 8) & 255, fy = (uint32_t)(v >> 8) & 255;
+                if (x0 < 0) { x0 = 0; fx = 0; }
+                else if (x0 > vw - 2) { x0 = vw - 2; fx = 256; }
+                if (y0 < 0) { y0 = 0; fy = 0; }
+                else if (y0 > vh - 2) { y0 = vh - 2; fy = 256; }
+                const uint32_t *p = view_buf + (size_t)y0 * vw + x0;
+                uint32_t a = p[0], b = p[1], c = p[vw], d = p[vw + 1];
+                /* red+blue and green lerped two channels at a time */
+                uint32_t rb0 = (((a & 0xff00ffu) * (256 - fx) + (b & 0xff00ffu) * fx) >> 8) & 0xff00ffu;
+                uint32_t g0 = (((a & 0xff00u) * (256 - fx) + (b & 0xff00u) * fx) >> 8) & 0xff00u;
+                uint32_t rb1 = (((c & 0xff00ffu) * (256 - fx) + (d & 0xff00ffu) * fx) >> 8) & 0xff00ffu;
+                uint32_t g1 = (((c & 0xff00u) * (256 - fx) + (d & 0xff00u) * fx) >> 8) & 0xff00u;
+                row[x] = 0xff000000u | ((((rb0 * (256 - fy) + rb1 * fy) >> 8) & 0xff00ffu) | (((g0 * (256 - fy) + g1 * fy) >> 8) & 0xff00u));
             }
         } else if (view) memcpy(row + RX0, view_buf + (size_t)(y - RY0 + m) * vw + m, sizeof(uint32_t) * (size_t)(RX1 - RX0));
         for (int x = xe; x < out_w; x++) row[x] = frame_px(j, x, y, gy);
