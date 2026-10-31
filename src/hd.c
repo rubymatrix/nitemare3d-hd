@@ -26,6 +26,7 @@
 #include "hd_tex.h"
 #include "hd_pack.h"
 #include "hud.h"
+#include "light.h"
 #include "rt/rt.h"
 #include "rt/host.h"
 
@@ -89,7 +90,12 @@ static float *col_t;
 /* per column texturing (filled serially, drawn in parallel) */
 static const hq_tex **col_tex;
 static float *col_u, *col_fu, *col_umin, *col_umax;
+static float *col_L; /* dynamic light at the wall: floor, eye and ceiling height (3 per column) */
 static size_t col_cap;
+static float *row_a; /* floor/ceiling depth of each view row (lighting) */
+static size_t row_cap;
+static int lighting;  /* the frame being drawn is lit (light.c) */
+static double light_px, light_py; /* where the player was when it was lit */
 
 static uint8_t ov_col[64000], ov_anchor[64000]; /* overlays drawn over the view (320x200 coords) */
 static uint8_t expected[64000];                 /* DIB after the regular overlays */
@@ -112,6 +118,7 @@ static void tex_flush(void) {
     for (int i = 0; i < TEX_SLOTS; i++) { free(tex_cache[i].data); tex_cache[i].data = NULL; }
     if (tex_fp) fclose(tex_fp);
     tex_fp = NULL;
+    light_flush();
 }
 
 /* Pixels of a frame entry (DS offset), read from IMG.n like FUN_1010_46da does. */
@@ -418,20 +425,49 @@ typedef struct { const cam_t *cam; } wall_job_t;
 static void draw_wall_columns(void *ctx, int x0, int x1) {
     const cam_t *cam = ((wall_job_t *)ctx)->cam;
     int bw = cam->bw, bh = cam->bh;
+    int split = (int)lround(cam->hor_hi);
+    if (split < 0) split = 0;
+    if (split > bh) split = bh;
+    double n2 = cam->c * cam->c + cam->s * cam->s, kf = cam->f * kx;
     for (int x = x0; x < x1; x++) {
         const hq_tex *t = col_tex[x];
-        if (col_vec[x] < 0 || !t) continue;
-        double a = zbuf[x];
-        double half = (cam->hs / (16.0 * a) + 0.5) * ky;
-        double mid = cam->wall_mid_hi + cam->eye * cam->hs / (16.0 * a) / 32.0 * ky; /* walls are 64 units high */
-        double top = mid - half;
-        int y0 = (int)ceil(top - 0.5), y1 = (int)ceil(mid + half - 0.5);
-        if (y0 < 0) y0 = 0;
-        if (y1 > bh) y1 = bh;
-        float step = (float)(64.0 / (2.0 * half));
-        float vpos = (float)((y0 + 0.5 - top) * step);
-        float u = col_u[x], fu = col_fu[x];
-        if (y1 > y0) hq_column_span(t, u, fu, col_umin[x], col_umax[x], vpos, step, y1 - y0, view_buf + (size_t)y0 * bw + x, bw);
+        int y0 = split, y1 = split;
+        if (col_vec[x] >= 0 && t) {
+            double a = zbuf[x];
+            double half = (cam->hs / (16.0 * a) + 0.5) * ky;
+            double mid = cam->wall_mid_hi + cam->eye * cam->hs / (16.0 * a) / 32.0 * ky; /* walls are 64 units high */
+            double top = mid - half;
+            y0 = (int)ceil(top - 0.5), y1 = (int)ceil(mid + half - 0.5);
+            if (y0 < 0) y0 = 0;
+            if (y1 > bh) y1 = bh;
+            float step = (float)(64.0 / (2.0 * half));
+            float vpos = (float)((y0 + 0.5 - top) * step);
+            float u = col_u[x], fu = col_fu[x];
+            if (y1 > y0) hq_column_span(t, u, fu, col_umin[x], col_umax[x], vpos, step, y1 - y0, view_buf + (size_t)y0 * bw + x, bw);
+            if (lighting) { /* height on the wall: 64 at its top, 0 at its foot */
+                const float *L = col_L + 3 * x;
+                uint32_t *p = view_buf + (size_t)y0 * bw + x;
+                for (int y = y0; y < y1; y++, p += bw) {
+                    float z = (float)(64.0 * (1.0 - (y + 0.5 - top) / (2.0 * half)));
+                    float l = z < 32 ? L[0] + (L[1] - L[0]) * (z < 0 ? 0 : z) / 32 : L[1] + (L[2] - L[1]) * ((z > 64 ? 64 : z) - 32) / 32;
+                    *p = light_apply(*p, light_scale(l));
+                }
+            }
+        }
+        if (!lighting) continue;
+        /* floor and ceiling around the wall: the world point under each pixel */
+        double tau = (x + 0.5 - cam->cx_hi) / kf;
+        double wx = (cam->c + cam->s * tau) / n2, wy = (cam->s - cam->c * tau) / n2;
+        for (int y = 0; y < y0 && y < split; y++) {
+            double a = row_a[y];
+            if (a <= 0) continue;
+            view_buf[(size_t)y * bw + x] = light_apply_flat(view_buf[(size_t)y * bw + x], light_scale(light_at(cam->px + a * wx, cam->py - a * wy, 2)));
+        }
+        for (int y = y1 > split ? y1 : split; y < bh; y++) {
+            double a = row_a[y];
+            if (a <= 0) continue;
+            view_buf[(size_t)y * bw + x] = light_apply_flat(view_buf[(size_t)y * bw + x], light_scale(light_at(cam->px + a * wx, cam->py - a * wy, 0)));
+        }
     }
 }
 
@@ -446,6 +482,14 @@ static void render_walls(const cam_t *cam) {
     for (size_t k = 0, e = (size_t)split * bw; k < e; k++) view_buf[k] = cc;
     for (size_t k = (size_t)split * bw, e = (size_t)bh * bw; k < e; k++) view_buf[k] = fc;
     for (int x = 0; x < bw; x++) { zbuf[x] = 1e30f; col_vec[x] = -1; }
+    if (exact_camera) lighting = 0;
+    if (lighting) { /* depth of the floor (below the horizon) or ceiling seen on each row */
+        if ((size_t)bh > row_cap) { row_cap = (size_t)bh; free(row_a); row_a = malloc(row_cap * sizeof *row_a); }
+        for (int y = 0; y < bh; y++) {
+            double d = (y + 0.5 - cam->wall_mid_hi) / ky, hh = y < split ? (-d - 0.5) / (1 - cam->eye / 32.0) : (d - 0.5) / (1 + cam->eye / 32.0);
+            row_a[y] = hh > 0 ? (float)(cam->hs / (16.0 * hh)) : -1;
+        }
+    }
 
     double kf = cam->f * kx; /* lateral/depth -> hd pixels */
     int nvec = ds16(0x7e46);
@@ -549,6 +593,8 @@ static void render_walls(const cam_t *cam) {
         }
         col_tex[x] = last_tex;
         col_u[x] = (float)u;
+        if (lighting) /* just in front of the wall: its own row of light cells */
+            light_at3(hx + (facing == 2 ? 2 : facing == 3 ? -2 : 0), hy + (facing == 0 ? -2 : facing == 1 ? 2 : 0), col_L + 3 * x);
     }
     /* texels per pixel across the column: from the neighbours on the same wall */
     for (int x = 0; x < bw; x++) {
@@ -592,6 +638,8 @@ typedef struct {
     const hq_tex *tex;
     float left, top, us, vs, depth;
     int c0, c1, r0, r1, sw, sh, ignore_depth;
+    int lit;          /* shaded by the dynamic light (light sources are not) */
+    const uint16_t *lf;
 } sprite_draw_t;
 static sprite_draw_t spr_draw[600];
 static int nspr_draw;
@@ -635,10 +683,35 @@ static void draw_sprite_columns(void *ctx, int x0, int x1) {
             int nrow = d->r1 - d->r0 < 4096 ? d->r1 - d->r0 : 4096;
             hq_column(d->tex, u, d->us, v, d->vs, nrow, tmp, 1);
             uint32_t *dst = view_buf + (size_t)d->r0 * bw + x;
+            if (d->lit)
+                for (int k = 0; k < nrow; k++) tmp[k] = light_apply(tmp[k], d->lf);
             for (int k = 0; k < nrow; k++, dst += bw) over(dst, tmp[k]);
         }
     }
 }
+
+/* the picture an object shows this frame (and its frame entry) */
+static const uint8_t *sprite_pixels(uint32_t o, uint16_t *entry, int *sw, int *sh) {
+    uint8_t set = MEMR8(o + 4), frame = MEMR8(o + 3);
+    int q = was_queued(o);
+    if (q >= 0) frame = queued_frame[q]; /* what the original drew this frame */
+    *entry = (uint16_t)(dsu16((uint16_t)(0x473a + set * 8)) + frame * 10);
+    *sw = ds8(*entry);
+    *sh = ds8((uint16_t)(*entry + 1));
+    if (*sw <= 0 || *sh <= 0) return NULL;
+    const uint8_t *pix = tex_get(*entry, (uint32_t)*sw * *sh);
+    if (pix && hd_check()) {
+        uint32_t fp = (uint32_t)ds32((uint16_t)(*entry + 6));
+        if (fp) {
+            int bad = 0;
+            for (int k = 0; k < *sw * *sh; k++) bad += MEMR8(SEGLIN(fp >> 16, (fp & 0xffff) + k)) != pix[k];
+            fprintf(stderr, "spritecheck set %d frame %d %dx%d: %d differ\n", set, frame, *sw, *sh, bad);
+        }
+    }
+    return pix;
+}
+
+static int light_pass; /* render_sprites only hands the light sources to light.c */
 
 static void render_sprites(const cam_t *cam) {
     static spr_t list[600];
@@ -669,6 +742,20 @@ static void render_sprites(const cam_t *cam) {
         list[n].y = y;
         n++;
     }
+    if (light_pass) { /* every light in the level, seen or not: it may light what is */
+        light_begin();
+        for (int i = 0; i < n; i++) {
+            uint32_t o = list[i].obj;
+            if (!(MEMR8(o + 5) & 1)) continue;
+            uint16_t entry;
+            int sw, sh;
+            const uint8_t *pix = sprite_pixels(o, &entry, &sw, &sh);
+            int8_t raise = (int8_t)MEMR8(o + 0x1a);
+            if (pix) light_sprite((uint32_t)ds32((uint16_t)(entry + 2)), pix, sw, sh, list[i].x, list[i].y, raise > 0 ? raise : 0);
+        }
+        light_end(cam->px, cam->py);
+        return;
+    }
     int m = 0;
     for (int i = 0; i < n; i++) {
         uint32_t o = list[i].obj;
@@ -682,7 +769,7 @@ static void render_sprites(const cam_t *cam) {
             double half = cam->hs / (16.0 * a) / 32.0 * 128 * kx;
             if (sx + half >= 0 && sx - half < cam->bw) hd_animate_object(o);
         }
-        list[m].obj = o; list[m].a = a; list[m].l = l; m++;
+        list[m] = list[i]; list[m].a = a; list[m].l = l; m++;
     }
     if (gather_only) return;
     qsort(list, (size_t)m, sizeof *list, spr_cmp);
@@ -692,22 +779,11 @@ static void render_sprites(const cam_t *cam) {
     for (int i = 0; i < m; i++) {
         uint32_t o = list[i].obj;
         double a = list[i].a;
-        uint8_t set = MEMR8(o + 4), frame = MEMR8(o + 3), flags = MEMR8(o + 5);
-        int q = was_queued(o);
-        if (q >= 0) frame = queued_frame[q]; /* what the original drew this frame */
+        uint8_t flags = MEMR8(o + 5);
         int8_t raise = (int8_t)MEMR8(o + 0x1a);
-        uint16_t entry = (uint16_t)(dsu16((uint16_t)(0x473a + set * 8)) + frame * 10);
-        int sw = ds8(entry), sh = ds8((uint16_t)(entry + 1));
-        if (sw <= 0 || sh <= 0) continue;
-        const uint8_t *pix = tex_get(entry, (uint32_t)sw * sh);
-        if (pix && hd_check()) {
-            uint32_t fp = (uint32_t)ds32((uint16_t)(entry + 6));
-            if (fp) {
-                int bad = 0;
-                for (int k = 0; k < sw * sh; k++) bad += MEMR8(SEGLIN(fp >> 16, (fp & 0xffff) + k)) != pix[k];
-                fprintf(stderr, "spritecheck set %d frame %d %dx%d: %d differ\n", set, frame, sw, sh, bad);
-            }
-        }
+        uint16_t entry;
+        int sw, sh;
+        const uint8_t *pix = sprite_pixels(o, &entry, &sw, &sh);
         if (!pix) continue;
         double hh = cam->hs / (16.0 * a);   /* rows from horizon to the floor at this depth */
         double texel = hh / 32.0;           /* rows (and columns) per texel */
@@ -735,6 +811,13 @@ static void render_sprites(const cam_t *cam) {
         d->sh = sh;
         d->depth = (float)a;
         d->ignore_depth = (flags & 0x10) != 0;
+        d->lit = lighting && !light_is_source((uint32_t)ds32((uint16_t)(entry + 2)), pix, sw, sh);
+        if (d->lit) { /* lit as at its middle */
+            float L[3], z = (float)((raise > 0 ? raise : 0) + sh * 0.5);
+            light_at3(list[i].x, list[i].y, L);
+            if (z > 64) z = 64;
+            d->lf = light_scale(z < 32 ? L[0] + (L[1] - L[0]) * z / 32 : L[1] + (L[2] - L[1]) * (z - 32) / 32);
+        }
         nspr_draw++;
     }
     hq_build_pending();
@@ -835,7 +918,7 @@ void hd_view_drawn(void) {
     if (need > view_cap) { free(view_buf); view_buf = malloc(need * sizeof *view_buf); view_cap = need; }
     if ((size_t)(RX1 - RX0 + 2 * VM) > col_cap) {
         col_cap = (size_t)(RX1 - RX0 + 2 * VM);
-        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax);
+        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax); free(col_L);
         zbuf = malloc(col_cap * sizeof *zbuf);
         col_vec = malloc(col_cap * sizeof *col_vec);
         col_t = malloc(col_cap * sizeof *col_t);
@@ -844,12 +927,13 @@ void hd_view_drawn(void) {
         col_fu = malloc(col_cap * sizeof *col_fu);
         col_umin = malloc(col_cap * sizeof *col_umin);
         col_umax = malloc(col_cap * sizeof *col_umax);
+        col_L = malloc(col_cap * 3 * sizeof *col_L);
     }
     if (need < 320 * 200) need = 320 * 200;
     if (need > view_cap) { free(view_buf); view_buf = malloc(need * sizeof *view_buf); view_cap = need; }
     if (col_cap < 320) {
         col_cap = 320;
-        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax);
+        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax); free(col_L);
         zbuf = malloc(col_cap * sizeof *zbuf);
         col_vec = malloc(col_cap * sizeof *col_vec);
         col_t = malloc(col_cap * sizeof *col_t);
@@ -858,6 +942,7 @@ void hd_view_drawn(void) {
         col_fu = malloc(col_cap * sizeof *col_fu);
         col_umin = malloc(col_cap * sizeof *col_umin);
         col_umax = malloc(col_cap * sizeof *col_umax);
+        col_L = malloc(col_cap * 3 * sizeof *col_L);
     }
     compare_with_original(d);
     take_snapshot();
@@ -915,6 +1000,14 @@ int hd_rerender(void) {
     cam_t cam;
     project_setup(&cam);
     if (getenv("N3D_TURNLOG")) fprintf(stderr, "cam %llu %.2f %.2f %.2f\n", (unsigned long long)host_time_us(), cam.px, cam.py, atan2(cam.c, cam.s) * 57.2957795);
+    lighting = light_enabled() && !exact_camera;
+    if (lighting) {
+        light_pass = 1;
+        render_sprites(&cam);
+        light_pass = 0;
+        light_px = cam.px;
+        light_py = cam.py;
+    }
     render_walls(&cam);
     no_animate = 1;
     render_sprites(&cam);
@@ -1058,6 +1151,8 @@ typedef struct {
     int xa, xb, ya, yb;  /* output pixels covered */
     uint32_t *out;
     int pitch;
+    int lit;             /* the weapon: shaded by the light where the player stands */
+    const uint16_t *lf;
 } layer_job_t;
 
 static void draw_layer_columns(void *ctx, int c0, int c1) {
@@ -1074,6 +1169,8 @@ static void draw_layer_columns(void *ctx, int c0, int c1) {
         if (u < 0 || u >= j->bw) continue;
         hq_column(j->tex, u, fu, v, fv, n, tmp, 1);
         uint32_t *dst = j->out + (size_t)j->ya * j->pitch + x;
+        if (j->lit)
+            for (int k = 0; k < n; k++) tmp[k] = light_apply(tmp[k], j->lf);
         for (int k = 0; k < n; k++, dst += j->pitch) over(dst, tmp[k]);
     }
 }
@@ -1166,6 +1263,8 @@ void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, 
         if (lj.yb > RY1) lj.yb = RY1; /* the bobbing weapon stays inside the view */
         lj.out = out;
         lj.pitch = pitch;
+        lj.lit = an == HD_ANCHOR_WEAPON && lighting;
+        if (lj.lit) lj.lf = light_scale(light_at(light_px, light_py, 1) + 0.2f); /* a little extra: it stays readable */
         if (lj.xb > lj.xa) hq_parallel(draw_layer_columns, &lj, lj.xb - lj.xa);
     }
     if (full_hud) hud_draw(out, pitch, out_w, out_h);

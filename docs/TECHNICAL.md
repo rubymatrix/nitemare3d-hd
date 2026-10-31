@@ -277,6 +277,25 @@ with `tools/hud_pack.py` (needs `python3`; without it the classic status
 bar is used). The browser build preloads it; `?hud=classic`, `?bob=0` and
 `?roll=0` work as URL options.
 
+### Dynamic lighting
+
+The hi-res view is lit by the level's own light sources (`src/light.c`):
+ceiling lamps, chandeliers, floor and globe lamps, candles, fires and
+explosions. They are recognised by a hash of their sprite's pixels (the
+art is shared by all three episodes) and placed at the bright part of the
+sprite. Each light is baked into a level-wide grid of 4-unit cells at
+floor, eye and ceiling height, with hard shadows from the wall vectors; a
+light is rebaked when a wall near it moves (doors). Lamps are summed once;
+candles and fires flicker and are added every frame. Walls (by height),
+floor, ceiling, sprites and the weapon are scaled by ambient + light; light
+sources themselves stay full bright, and a faint light around the player
+keeps dark corners playable.
+
+| Option | Meaning |
+| --- | --- |
+| `--light on\|off` | dynamic lighting (default on) |
+| `--ambient F` | brightness away from any light, 0..1 (default 0.35) |
+
 ### Texture filtering and upscaling
 
 The hi-res view is drawn in true colour (`src/hd_tex.c`); the HUD and menus

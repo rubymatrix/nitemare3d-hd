@@ -30,6 +30,7 @@
 #include "hd_pack.h"
 #include "hud.h"
 #include "video.h"
+#include "light.h"
 
 /* Game entry points in the recompiled code (see re/names.txt). */
 #define G_INIT_INSTANCE 0x101010ccu /* parse command line + initialise all subsystems */
@@ -974,7 +975,9 @@ static void usage(const char *argv0) {
             "  --hud gothic|classic  full-screen gothic HUD over the largest view, or the original status bar (default gothic)\n"
             "  --hud-pak FILE  HUD art made by tools/hud_pack.py (default: $N3D_HUD_PAK, else hud.pak next to the program)\n"
             "  --bob F      Quake-style view and weapon bob while moving: 0 off, 1 default, 2 double\n"
-            "  --roll DEG   Quake-style view roll into sideways motion, degrees at walking speed (default 2, 0 off)\n",
+            "  --roll DEG   Quake-style view roll into sideways motion, degrees at walking speed (default 2, 0 off)\n"
+            "  --light on|off  dynamic lighting from the level's lamps, chandeliers, candles and fires (default on)\n"
+            "  --ambient F  brightness away from any light, 0..1 (default 0.35)\n",
             argv0);
 }
 
@@ -1176,6 +1179,13 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--bob") && i + 1 < argc) hd_bob_scale = atof(argv[++i]);
         else if (!strcmp(argv[i], "--roll") && i + 1 < argc) hd_roll_angle = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--light") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "on")) light_set_enabled(1);
+            else if (!strcmp(v, "off")) light_set_enabled(0);
+            else { usage(argv[0]); return 1; }
+        }
+        else if (!strcmp(argv[i], "--ambient") && i + 1 < argc) light_ambient = atof(argv[++i]);
         else if (!strcmp(argv[i], "--classic")) { res_mode = RES_FIXED; render_w = 320; render_h = 200; }
         else if (!strcmp(argv[i], "--res") && i + 1 < argc) {
             const char *r = argv[++i];

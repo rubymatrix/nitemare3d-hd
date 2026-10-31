@@ -65,6 +65,7 @@ add_executable(nitemare3d
   src/hd_tex.c
   src/hd_pack.c
   src/hud.c
+  src/light.c
   ${GEN_SOURCES})
 
 # Gothic HUD art (assets/hud) -> hud.pak next to the program (see README, "Gothic HUD").
