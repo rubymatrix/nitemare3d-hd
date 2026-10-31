@@ -78,6 +78,11 @@ if(Python3_Interpreter_FOUND AND HUD_ASSETS)
   add_custom_target(hud_pak ALL DEPENDS ${CMAKE_BINARY_DIR}/hud.pak)
   add_dependencies(nitemare3d hud_pak)
   set(N3D_HUD_PAK ${CMAKE_BINARY_DIR}/hud.pak)
+  if(CMAKE_CONFIGURATION_TYPES)
+    # Visual Studio puts the program in build/Release; the game looks for hud.pak next to it.
+    add_custom_command(TARGET nitemare3d POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${N3D_HUD_PAK} $<TARGET_FILE_DIR:nitemare3d>)
+  endif()
 else()
   message(WARNING "python3 or assets/hud missing: no hud.pak, the classic status bar is used")
 endif()
