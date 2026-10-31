@@ -11,19 +11,28 @@ if (-not $env:GHIDRA_INSTALL_DIR) { throw 'set GHIDRA_INSTALL_DIR to your Ghidra
 $Headless = Join-Path $env:GHIDRA_INSTALL_DIR 'support\analyzeHeadless.bat'
 if (-not (Test-Path $Headless)) { throw "$Headless not found" }
 $env:PYTHONUTF8 = '1' # the scripts read and write UTF-8, not the ANSI code page
-function Run-Python { & python -I @args; if ($LASTEXITCODE) { throw "python $args failed" } }
+# Native tools report problems by exit code. Their stderr (the recompiler's
+# warnings, Ghidra's log) must not stop the script, which Windows PowerShell
+# does under 'Stop' as soon as that output is redirected.
+function Run-Native([string]$exe) {
+    $ErrorActionPreference = 'Continue'
+    & $exe @args
+    if ($LASTEXITCODE) { throw "$exe $args failed (exit $LASTEXITCODE)" }
+}
+function Run-Python { Run-Native python -I @args }
 
 New-Item -ItemType Directory -Force "$Root\ghidra_proj", "$Root\decomp", "$Root\recomp\export" | Out-Null
 $log = "$Root\ghidra_proj\log.txt"
-& $Headless "$Root\ghidra_proj" nite3w -import "$Root\original\NITE3W.EXE" -overwrite `
-    -scriptPath "$Root\tools\ghidra_scripts" `
-    -postScript FindMissingFuncs.java `
-    -postScript ApplyNames.java "$Root\re\names.txt" `
-    -postScript ExportDecomp.java "$Root\decomp" `
-    -postScript ExportAsm.java "$Root\decomp" `
-    -postScript ExportRecomp.java "$Root\recomp\export" *> $log
-if ($LASTEXITCODE) { Get-Content $log -Tail 30; throw 'Ghidra failed' }
-Select-String -Path $log -Pattern 'ApplyNames.java>|FindMissingFuncs.java>|ERROR' | ForEach-Object { $_.Line }
+try {
+    Run-Native $Headless "$Root\ghidra_proj" nite3w -import "$Root\original\NITE3W.EXE" -overwrite `
+        -scriptPath "$Root\tools\ghidra_scripts" `
+        -postScript FindMissingFuncs.java `
+        -postScript ApplyNames.java "$Root\re\names.txt" `
+        -postScript ExportDecomp.java "$Root\decomp" `
+        -postScript ExportAsm.java "$Root\decomp" `
+        -postScript ExportRecomp.java "$Root\recomp\export" *> $log
+} catch { Get-Content $log -Tail 30; throw 'Ghidra failed' }
+Select-String -Path $log -CaseSensitive -Pattern 'ApplyNames.java>|FindMissingFuncs.java>|ERROR' | ForEach-Object { $_.Line }
 
 Run-Python "$Root\tools\annotate.py" "$Root\decomp\decomp.c" "$Root\re\nite3w.c"
 Run-Python "$Root\tools\annotate.py" "$Root\decomp\nite3w.asm" "$Root\re\nite3w.asm"
