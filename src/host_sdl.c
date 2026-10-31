@@ -77,7 +77,25 @@ enum { RES_FIXED, RES_WINDOW, RES_DESKTOP };
 static int res_mode = RES_WINDOW;
 static int render_w = 320, render_h = 200;
 
+/* --render-scale: the hi-res frame is drawn at this fraction of the window or
+ * desktop size and the video backend enlarges it. 0 = auto: full size up to
+ * about 2560x1080 worth of pixels, smaller beyond that, since every pixel is
+ * drawn on the CPU (3440x1440 with lighting does not hold 60 fps on 8 cores). */
+#define RENDER_SCALE_AUTO_PIXELS 2.8e6
+#ifdef _WIN32
+static double render_scale = 0;
+#else
+static double render_scale = 1;
+#endif
+
 static void setup_render_target(int w, int h) {
+    if (res_mode != RES_FIXED && !(w == 320 && h == 200)) {
+        double s = render_scale > 0 ? render_scale : (double)w * h > RENDER_SCALE_AUTO_PIXELS ? sqrt(RENDER_SCALE_AUTO_PIXELS / ((double)w * h)) : 1;
+        if (s < 1) {
+            w = (int)(w * s + 0.5);
+            h = (int)(h * s + 0.5);
+        }
+    }
     if (w < 64) w = 64;
     if (h < 48) h = 48;
     if (w == render_w && h == render_h && have_target) return;
@@ -946,6 +964,13 @@ static void usage(const char *argv0) {
             "  --fm-driver FILE  FM synth plays like Windows 3.1's Ad Lib driver, patches from your MSADLIB.DRV\n"
             "  --res WxH    render resolution, e.g. 1920x1080, 3440x1440 (default: match window)\n"
             "  --res window | desktop   follow the window size / use the desktop resolution\n"
+#ifdef _WIN32
+            "  --render-scale F|auto   draw the hi-res frame at F x the window size, enlarged smoothly\n"
+            "               (default auto: full size up to about 2560x1080 worth of pixels)\n"
+#else
+            "  --render-scale F|auto   draw the hi-res frame at F x the window size, enlarged smoothly\n"
+            "               (default 1; auto: full size up to about 2560x1080 worth of pixels)\n"
+#endif
             "  --classic    original 320x200 frame, scaled (same as --res 320x200)\n"
             "  --scale N    initial window size: 320x240 * N\n"
 #ifdef _WIN32
@@ -1187,6 +1212,12 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--ambient") && i + 1 < argc) light_ambient = atof(argv[++i]);
         else if (!strcmp(argv[i], "--classic")) { res_mode = RES_FIXED; render_w = 320; render_h = 200; }
+        else if (!strcmp(argv[i], "--render-scale") && i + 1 < argc) {
+            const char *v = argv[++i];
+            render_scale = strcmp(v, "auto") ? atof(v) : 0;
+            if (render_scale < 0 || render_scale > 1 || (render_scale == 0 && strcmp(v, "auto"))) { usage(argv[0]); return 1; }
+            if (render_scale > 0 && render_scale < 0.25) render_scale = 0.25;
+        }
         else if (!strcmp(argv[i], "--res") && i + 1 < argc) {
             const char *r = argv[++i];
             int w, h;

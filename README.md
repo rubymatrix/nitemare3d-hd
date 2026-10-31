@@ -140,6 +140,7 @@ gets dark, with a faint glow around you.
 | `--roll 0` | turn off the view leaning when you strafe |
 | `--no-vsync` | don't wait for the screen refresh (good with G-SYNC / FreeSync screens) |
 | `--light off` | turn off the lighting (everything evenly lit, as in 1994) |
+| `--render-scale 1` | draw the game at your full screen resolution (Windows draws very large screens a bit smaller and enlarges the picture, to keep 60 fps) |
 | `--ambient 0.5` | make unlit areas brighter (0 to 1, default 0.35) |
 
 Put an option at the end of the play command, for example

@@ -180,6 +180,7 @@ switch away.
 | Option | Meaning |
 | --- | --- |
 | `--res WxH` | fixed render resolution (the window scales it, letterboxed) |
+| `--render-scale F\|auto` | draw the hi-res frame at F times the window or desktop size; the video backend enlarges it with bilinear filtering. `auto` keeps full size up to about 2.8 million pixels (2560x1080) and scales down past that, since every pixel is drawn on the CPU. Default `auto` on Windows, `1` elsewhere |
 | `--res window` | default: render resolution follows the window size |
 | `--res desktop` | render at the desktop resolution |
 | `--classic` (= `--res 320x200`) | the original frame only, shown at 4:3 |
