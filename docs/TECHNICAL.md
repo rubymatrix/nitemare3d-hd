@@ -51,7 +51,7 @@ workload; it includes CMake. From a Developer PowerShell:
 
 ```powershell
 python tools\extract_installer.py C:\path\to\win3_Nite3d3x.zip original
-$env:GHIDRA_INSTALL_DIR = 'C:\path\to\ghidra_12.0_PUBLIC'
+$env:GHIDRA_INSTALL_DIR = 'C:\path\to\ghidra_11.3.2_PUBLIC'
 $env:JAVA_HOME = 'C:\path\to\jdk-21'
 powershell -ExecutionPolicy Bypass -File tools\build_gen.ps1
 cmake --preset windows
@@ -78,7 +78,7 @@ own script.
 
 ## Regenerating `src/gen/` from the executable
 
-Needs Ghidra 12.x and a JDK 21 (`brew install ghidra openjdk@21`):
+Needs Ghidra 11.3 or later (12.x tested on macOS) and a JDK 21 (`brew install ghidra openjdk@21`):
 
 ```bash
 GHIDRA_INSTALL_DIR=/opt/homebrew/opt/ghidra/libexec JAVA_HOME=/opt/homebrew/opt/openjdk@21 tools/build_gen.sh

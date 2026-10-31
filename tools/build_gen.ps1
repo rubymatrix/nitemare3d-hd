@@ -1,7 +1,7 @@
 # Windows version of tools/build_gen.sh + tools/redecomp.sh: regenerate src/gen/
 # from original/NITE3W.EXE (Ghidra analysis + export, NE relocation scan,
 # p-code recompiler, data image).
-# Needs Ghidra 12.x ($env:GHIDRA_INSTALL_DIR), a JDK 21 ($env:JAVA_HOME) and Python 3.
+# Needs Ghidra 11.3 or later ($env:GHIDRA_INSTALL_DIR), a JDK 21 ($env:JAVA_HOME) and Python 3.
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 if (-not (Test-Path "$Root\original\NITE3W.EXE")) {

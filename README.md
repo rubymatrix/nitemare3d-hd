@@ -62,13 +62,13 @@ repository.
 ## Build and play (Windows)
 
 1. Install Visual Studio 2022 or later with "Desktop development with C++",
-   plus Python 3, a JDK 21 and Ghidra 12.
+   plus Python 3, a JDK 21 and Ghidra 11.3 or later.
 
 2. In a Developer PowerShell, unpack the game files and convert the game:
 
    ```powershell
    python tools\extract_installer.py C:\path\to\win3_Nite3d3x.zip original
-   $env:GHIDRA_INSTALL_DIR = 'C:\path\to\ghidra_12.0_PUBLIC'
+   $env:GHIDRA_INSTALL_DIR = 'C:\path\to\ghidra_11.3.2_PUBLIC'
    $env:JAVA_HOME = 'C:\path\to\jdk-21'
    powershell -ExecutionPolicy Bypass -File tools\build_gen.ps1
    ```
