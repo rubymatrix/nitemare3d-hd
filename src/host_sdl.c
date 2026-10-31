@@ -947,7 +947,12 @@ static void usage(const char *argv0) {
             "  --res window | desktop   follow the window size / use the desktop resolution\n"
             "  --classic    original 320x200 frame, scaled (same as --res 320x200)\n"
             "  --scale N    initial window size: 320x240 * N\n"
+#ifdef _WIN32
+            "  --fullscreen / --windowed   start borderless fullscreen (default) or in a window (Alt+Enter toggles)\n"
+#else
             "  --fullscreen start in fullscreen (Alt+Enter toggles)\n"
+            "  --windowed   start in a window (the default)\n"
+#endif
 #ifdef N3D_D3D12
             "  --renderer d3d12|direct3d11|opengl   video backend (default: d3d12, else SDL's choice)\n"
 #else
@@ -1121,11 +1126,18 @@ int main(int argc, char **argv) {
     const char *hud_pak = getenv("N3D_HUD_PAK");
     int hud_on = 1;
     char game_args[256] = "";
+#ifdef _WIN32
+    /* Windows starts like the macOS app: borderless fullscreen at the desktop
+     * resolution with scale6x textures (--windowed for a window). */
+    fullscreen = 1;
+    hq.upscale = 6;
+#endif
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--data") && i + 1 < argc) data_dir = argv[++i];
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) user_dir = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
+        else if (!strcmp(argv[i], "--windowed")) fullscreen = 0;
         else if (!strcmp(argv[i], "--renderer") && i + 1 < argc) renderer_name = argv[++i];
         else if (!strcmp(argv[i], "--no-spaces")) no_spaces = 1;
         else if (!strcmp(argv[i], "--no-vsync")) vsync = 0;
