@@ -90,6 +90,7 @@ static float *col_t;
 static const hq_tex **col_tex;
 static float *col_u, *col_fu, *col_umin, *col_umax;
 static float *col_L; /* dynamic light at the wall: floor, eye and ceiling height (3 per column) */
+static int *col_y0, *col_y1; /* rows the wall covers in each column */
 static size_t col_cap;
 static float *row_a; /* floor/ceiling depth of each view row (lighting) */
 static size_t row_cap;
@@ -397,7 +398,9 @@ static void project_setup(cam_t *cam) {
     cam->hor_hi = oy + hor * ky - RY0 + shift;  /* first floor row */
     cam->wall_mid_hi = oy + (hor + 0.5) * ky - RY0 + shift;
     cam->eye = exact_camera ? 0 : bob_eye;
-    int m = exact_camera ? 0 : VM;
+    /* overscan just wide enough for the current roll (none while level): buffers hold VM */
+    int m = exact_camera || fabs(view_roll) <= 0.01 ? 0 : (int)ceil(sin(fabs(view_roll) * (BOB_PI / 180.0)) * ((RX1 - RX0) + (RY1 - RY0)) * 0.5) + 2;
+    if (m > VM) m = VM;
     view_m = m;
     cam->cx_hi += m;
     cam->hor_hi += m;
@@ -421,7 +424,6 @@ static void draw_wall_columns(void *ctx, int x0, int x1) {
     int split = (int)lround(cam->hor_hi);
     if (split < 0) split = 0;
     if (split > bh) split = bh;
-    double n2 = cam->c * cam->c + cam->s * cam->s, kf = cam->f * kx;
     for (int x = x0; x < x1; x++) {
         const hq_tex *t = col_tex[x];
         int y0 = split, y1 = split;
@@ -438,28 +440,61 @@ static void draw_wall_columns(void *ctx, int x0, int x1) {
             float u = col_u[x], fu = col_fu[x];
             if (y1 > y0) hq_column_span(t, u, fu, col_umin[x], col_umax[x], vpos, step, y1 - y0, view_buf + (size_t)y0 * bw + x, bw);
             if (lighting) { /* height on the wall: 64 at its top, 0 at its foot */
+                /* light is linear in height above and below eye level: step its LUT index in 16.16 */
                 const float *L = col_L + 3 * x;
                 uint32_t *p = view_buf + (size_t)y0 * bw + x;
-                for (int y = y0; y < y1; y++, p += bw) {
-                    float z = (float)(64.0 * (1.0 - (y + 0.5 - top) / (2.0 * half)));
-                    float l = z < 32 ? L[0] + (L[1] - L[0]) * (z < 0 ? 0 : z) / 32 : L[1] + (L[2] - L[1]) * ((z > 64 ? 64 : z) - 32) / 32;
-                    *p = light_apply(*p, light_scale(l));
+                double z = 64.0 * (1.0 - (y0 + 0.5 - top) / (2.0 * half)), dz = 64.0 / (2.0 * half);
+                int ymid = (int)ceil(top + half - 0.5); /* first row below eye level */
+                for (int part = 0; part < 2; part++) {
+                    int ya = part ? (ymid > y0 ? ymid : y0) : y0, yb = part ? y1 : (ymid < y1 ? ymid : y1);
+                    if (yb <= ya) continue;
+                    double zz = z - (ya - y0) * dz;
+                    double la = part ? L[0] : L[1], lb = part ? L[1] : L[2], z0 = part ? 0 : 32; /* la at z0, lb at z0 + 32 */
+                    double i0 = (la + (lb - la) * (zz - z0) / 32) * LIGHT_LUT_STEPS, di = -(lb - la) * dz / 32 * LIGHT_LUT_STEPS;
+                    int32_t idx = (int32_t)lround(i0 * 65536.0), didx = (int32_t)lround(di * 65536.0);
+                    uint32_t *q = p + (size_t)(ya - y0) * bw;
+                    for (int y = ya; y < yb; y++, q += bw, idx += didx) {
+                        int i = (idx + 32768) >> 16;
+                        *q = light_apply(*q, light_lut[i < 0 ? 0 : i >= LIGHT_LUT_N ? LIGHT_LUT_N - 1 : i]);
+                    }
                 }
             }
         }
-        if (!lighting) continue;
-        /* floor and ceiling around the wall: the world point under each pixel */
-        double tau = (x + 0.5 - cam->cx_hi) / kf;
-        double wx = (cam->c + cam->s * tau) / n2, wy = (cam->s - cam->c * tau) / n2;
-        for (int y = 0; y < y0 && y < split; y++) {
-            double a = row_a[y];
-            if (a <= 0) continue;
-            view_buf[(size_t)y * bw + x] = light_apply_flat(view_buf[(size_t)y * bw + x], light_scale(light_at(cam->px + a * wx, cam->py - a * wy, 2)));
-        }
-        for (int y = y1 > split ? y1 : split; y < bh; y++) {
-            double a = row_a[y];
-            if (a <= 0) continue;
-            view_buf[(size_t)y * bw + x] = light_apply_flat(view_buf[(size_t)y * bw + x], light_scale(light_at(cam->px + a * wx, cam->py - a * wy, 0)));
+        col_y0[x] = y0;
+        col_y1[x] = y1;
+    }
+}
+
+/* light the floor and ceiling around the walls, row by row: along a row the
+ * world point under each pixel moves in a straight line (worker threads) */
+static void shade_flat_rows(void *ctx, int r0, int r1) {
+    const cam_t *cam = ((wall_job_t *)ctx)->cam;
+    int bw = cam->bw;
+    int split = (int)lround(cam->hor_hi);
+    double n2 = cam->c * cam->c + cam->s * cam->s, kf = cam->f * kx;
+    float L[1024 / 4 + 2];
+    for (int y = r0; y < r1; y++) {
+        double a = row_a[y];
+        if (a <= 0) continue;
+        int ceiling = y < split;
+        uint32_t *row = view_buf + (size_t)y * bw;
+        for (int x0 = 0; x0 < bw; x0 += 1024) {
+            int n = bw - x0 < 1024 ? bw - x0 : 1024;
+            double tau = (x0 + 0.5 - cam->cx_hi) / kf, dt = 1.0 / kf;
+            /* every 4th pixel, linear in between */
+            light_span(cam->px + a * (cam->c + cam->s * tau) / n2, cam->py - a * (cam->s - cam->c * tau) / n2,
+                       4 * a * cam->s * dt / n2, 4 * a * cam->c * dt / n2, n / 4 + 2, ceiling ? 2 : 0, L);
+            const int *cy = ceiling ? col_y0 + x0 : col_y1 + x0;
+            uint32_t *px = row + x0;
+            for (int g = 0; g < n; g += 4) {
+                int32_t idx = (int32_t)(L[g >> 2] * (LIGHT_LUT_STEPS * 65536.0f)) + 32768;
+                int32_t didx = ((int32_t)(L[(g >> 2) + 1] * (LIGHT_LUT_STEPS * 65536.0f)) + 32768 - idx) >> 2;
+                for (int k = g; k < g + 4 && k < n; k++, idx += didx) {
+                    if (ceiling ? y >= cy[k] : y < cy[k]) continue;
+                    int i = idx >> 16;
+                    px[k] = light_apply_flat(px[k], light_lut[i < 0 ? 0 : i >= LIGHT_LUT_N ? LIGHT_LUT_N - 1 : i]);
+                }
+            }
         }
     }
 }
@@ -599,6 +634,7 @@ static void render_walls(const cam_t *cam) {
     hq_build_pending();
     wall_job_t job = {cam};
     hq_parallel(draw_wall_columns, &job, bw);
+    if (lighting) hq_parallel(shade_flat_rows, &job, bh);
 }
 
 typedef struct { uint32_t obj; double a, l, x, y; } spr_t;
@@ -911,7 +947,7 @@ void hd_view_drawn(void) {
     if (need > view_cap) { free(view_buf); view_buf = malloc(need * sizeof *view_buf); view_cap = need; }
     if ((size_t)(RX1 - RX0 + 2 * VM) > col_cap) {
         col_cap = (size_t)(RX1 - RX0 + 2 * VM);
-        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax); free(col_L);
+        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax); free(col_L); free(col_y0); free(col_y1);
         zbuf = malloc(col_cap * sizeof *zbuf);
         col_vec = malloc(col_cap * sizeof *col_vec);
         col_t = malloc(col_cap * sizeof *col_t);
@@ -921,12 +957,14 @@ void hd_view_drawn(void) {
         col_umin = malloc(col_cap * sizeof *col_umin);
         col_umax = malloc(col_cap * sizeof *col_umax);
         col_L = malloc(col_cap * 3 * sizeof *col_L);
+        col_y0 = malloc(col_cap * sizeof *col_y0);
+        col_y1 = malloc(col_cap * sizeof *col_y1);
     }
     if (need < 320 * 200) need = 320 * 200;
     if (need > view_cap) { free(view_buf); view_buf = malloc(need * sizeof *view_buf); view_cap = need; }
     if (col_cap < 320) {
         col_cap = 320;
-        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax); free(col_L);
+        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax); free(col_L); free(col_y0); free(col_y1);
         zbuf = malloc(col_cap * sizeof *zbuf);
         col_vec = malloc(col_cap * sizeof *col_vec);
         col_t = malloc(col_cap * sizeof *col_t);
@@ -936,6 +974,8 @@ void hd_view_drawn(void) {
         col_umin = malloc(col_cap * sizeof *col_umin);
         col_umax = malloc(col_cap * sizeof *col_umax);
         col_L = malloc(col_cap * 3 * sizeof *col_L);
+        col_y0 = malloc(col_cap * sizeof *col_y0);
+        col_y1 = malloc(col_cap * sizeof *col_y1);
     }
     compare_with_original(d);
     take_snapshot();
@@ -1093,25 +1133,6 @@ static const hd_pack_img *pick_wide(const hd_pack_img *ui) {
     return fit ? fit : narrowest;
 }
 
-/* bilinear XRGB sample of the overscanned view at (x, y) in its own pixels */
-static inline uint32_t view_sample(double x, double y, int vw, int vh) {
-    x -= 0.5; y -= 0.5;
-    int x0 = (int)floor(x), y0 = (int)floor(y);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x0 > vw - 2) x0 = vw - 2;
-    if (y0 > vh - 2) y0 = vh - 2;
-    uint32_t fx = (uint32_t)lround((x - x0 < 0 ? 0 : x - x0 > 1 ? 1 : x - x0) * 256);
-    uint32_t fy = (uint32_t)lround((y - y0 < 0 ? 0 : y - y0 > 1 ? 1 : y - y0) * 256);
-    const uint32_t *p = view_buf + (size_t)y0 * vw + x0;
-    uint32_t a = p[0], b = p[1], c = p[vw], d = p[vw + 1], r = 0xff000000u;
-    for (int sh = 0; sh < 24; sh += 8) {
-        uint32_t t = ((a >> sh & 255) * (256 - fx) + (b >> sh & 255) * fx) * (256 - fy) + ((c >> sh & 255) * (256 - fx) + (d >> sh & 255) * fx) * fy;
-        r |= (t >> 16) << sh;
-    }
-    return r;
-}
-
 static void compose_rows(void *ctx, int y0, int y1) {
     const compose_job_t *j = ctx;
     int m = view_m, vw = RX1 - RX0 + 2 * m, vh = RY1 - RY0 + 2 * m;
@@ -1126,10 +1147,22 @@ static void compose_rows(void *ctx, int y0, int y1) {
         int xs = view ? RX0 : out_w, xe = view ? RX1 : out_w;
         for (int x = 0; x < xs; x++) row[x] = frame_px(j, x, y, gy);
         if (view && rolled) {
-            double dy = y - RY0 + 0.5 - ccy;
-            for (int x = RX0; x < RX1; x++) {
-                double dx = x - RX0 + 0.5 - ccx;
-                row[x] = view_sample(dx * rc - dy * rs + ccx + m, dx * rs + dy * rc + ccy + m, vw, vh);
+            /* the source point steps by (rc, rs) per pixel: 16.16 fixed point, bilinear on two channel pairs */
+            double dy = y - RY0 + 0.5 - ccy, dx = 0.5 - ccx;
+            int32_t u = (int32_t)lround((dx * rc - dy * rs + ccx + m - 0.5) * 65536.0);
+            int32_t v = (int32_t)lround((dx * rs + dy * rc + ccy + m - 0.5) * 65536.0);
+            int32_t du = (int32_t)lround(rc * 65536.0), dv = (int32_t)lround(rs * 65536.0);
+            int32_t umax = (vw - 2) << 16, vmax = (vh - 2) << 16;
+            for (int x = RX0; x < RX1; x++, u += du, v += dv) {
+                int32_t cu = u < 0 ? 0 : u > umax ? umax : u, cv = v < 0 ? 0 : v > vmax ? vmax : v;
+                uint32_t fx = (uint32_t)(cu >> 8) & 255, fy = (uint32_t)(cv >> 8) & 255;
+                const uint32_t *p = view_buf + (size_t)(cv >> 16) * vw + (cu >> 16);
+                uint32_t a = p[0], b = p[1], c = p[vw], d = p[vw + 1];
+                uint32_t rb0 = ((a & 0xff00ff) * (256 - fx) + (b & 0xff00ff) * fx) >> 8 & 0xff00ff;
+                uint32_t g0 = ((a & 0xff00) * (256 - fx) + (b & 0xff00) * fx) >> 8 & 0xff00;
+                uint32_t rb1 = ((c & 0xff00ff) * (256 - fx) + (d & 0xff00ff) * fx) >> 8 & 0xff00ff;
+                uint32_t g1 = ((c & 0xff00) * (256 - fx) + (d & 0xff00) * fx) >> 8 & 0xff00;
+                row[x] = 0xff000000u | ((rb0 * (256 - fy) + rb1 * fy) >> 8 & 0xff00ff) | ((g0 * (256 - fy) + g1 * fy) >> 8 & 0xff00);
             }
         } else if (view) memcpy(row + RX0, view_buf + (size_t)(y - RY0 + m) * vw + m, sizeof(uint32_t) * (size_t)(RX1 - RX0));
         for (int x = xe; x < out_w; x++) row[x] = frame_px(j, x, y, gy);
@@ -1168,6 +1201,50 @@ static void draw_layer_columns(void *ctx, int c0, int c1) {
             for (int k = 0; k < n; k++) tmp[k] = light_apply(tmp[k], j->lf);
         for (int k = 0; k < n; k++, dst += j->pitch) over(dst, tmp[k]);
     }
+}
+
+/* Hit reaction: when health drops, the edges of the screen flash red, more
+ * for a bigger hit, fading out over about half a second. */
+int hd_hit_flash = 1;
+typedef struct { uint32_t *out; int pitch; float k, band; } flash_job_t;
+
+static void flash_rows(void *ctx, int y0, int y1) {
+    const flash_job_t *j = ctx;
+    for (int y = y0; y < y1; y++) {
+        float dy = (float)(y < out_h - 1 - y ? y : out_h - 1 - y);
+        uint32_t *row = j->out + (size_t)y * j->pitch;
+        int full = dy < j->band; /* rows near the top or bottom: every pixel, else only the sides */
+        for (int x = 0; x < out_w; x++) {
+            if (!full && x >= (int)j->band && x < out_w - (int)j->band) { x = out_w - (int)j->band - 1; continue; }
+            float dx = (float)(x < out_w - 1 - x ? x : out_w - 1 - x);
+            float d = (dx < dy ? dx : dy) / j->band;
+            if (d >= 1) continue;
+            float e = (1 - d) * (1 - d);
+            uint32_t a = (uint32_t)(j->k * e * 220), c = row[x];
+            uint32_t r = ((c >> 16) & 255) * (255 - a) / 255 + a * 200 / 255, g = ((c >> 8) & 255) * (255 - a) / 255, b = (c & 255) * (255 - a) / 255;
+            row[x] = 0xff000000u | r << 16 | g << 8 | b;
+        }
+    }
+}
+
+static void hit_flash(uint32_t *out, int pitch) {
+    static int last_health = -1;
+    static float level;
+    static uint64_t last_t;
+    uint64_t now = host_time_us();
+    float dt = last_t ? (float)((now - last_t) / 1e6) : 0;
+    last_t = now;
+    int playing = ds8(0x46a4) == 1, health = ds8(0x4c0d);
+    if (!playing) { last_health = -1; level = 0; return; }
+    if (last_health >= 0 && health < last_health) {
+        float hit = 0.45f + (last_health - health) * 0.04f;
+        level = level + hit > 1 ? 1 : level + hit;
+    }
+    last_health = health;
+    level -= dt * 2.0f;
+    if (level <= 0 || !hd_hit_flash) { level = level < 0 ? 0 : level; return; }
+    flash_job_t j = {out, pitch, level, (float)(out_w < out_h ? out_w : out_h) * 0.22f};
+    hq_parallel(flash_rows, &j, out_h);
 }
 
 void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, int pitch) {
@@ -1262,5 +1339,6 @@ void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, 
         if (lj.lit) lj.lf = light_scale(light_at(light_px, light_py, 1) + 0.2f); /* a little extra: it stays readable */
         if (lj.xb > lj.xa) hq_parallel(draw_layer_columns, &lj, lj.xb - lj.xa);
     }
+    hit_flash(out, pitch);
     if (full_hud) hud_draw(out, pitch, out_w, out_h);
 }

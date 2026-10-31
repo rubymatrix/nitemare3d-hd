@@ -252,6 +252,15 @@ keeps dark corners playable.
 | `--light on\|off` | dynamic lighting (default on) |
 | `--ambient F` | brightness away from any light, 0..1 (default 0.35) |
 
+When health drops, the edges of the screen flash red (`hit_flash` in
+`src/hd.c`), stronger for a bigger hit, fading over about half a second;
+`--hit-flash off` turns it off.
+
+The view roll is composited with fixed-point stepping and a two-channel
+bilinear blend, and the overscan it needs is only rendered while the view
+is actually rolled. Floor and ceiling light is applied in a row pass that
+samples the light grid every 4 pixels and steps a LUT index in between.
+
 ### Texture filtering and upscaling
 
 The hi-res view is drawn in true colour (`src/hd_tex.c`); the HUD and menus

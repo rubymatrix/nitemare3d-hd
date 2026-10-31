@@ -39,6 +39,7 @@ void hd_layer_begin(int anchor);  /* following draws into the view are an overla
 extern double hd_bob_scale;
 /* Quake-style view roll into sideways motion, in degrees at walking speed (0 off). */
 extern double hd_roll_angle;
+extern int hd_hit_flash; /* red flash around the screen edges when hurt (default on) */
 void hd_layer_end(void);
 int hd_layer_current(void);      /* anchor of the open layer, 0 if none */
 /* The gothic HUD replaces the status bar: the view fills the output and the

@@ -85,7 +85,8 @@ With the view at full size, the 3D view fills the whole screen and the old
 status bar is replaced by a gothic HUD: your face in a pointed frame, a
 health bar, the ammo for your weapon, and your keys and items. Walking
 bobs the view and weapon like in Quake, and strafing leans the view a
-little. The HUD art is in `assets/hud/`.
+little. When you get hurt, the edges of the screen flash red. The HUD art
+is in `assets/hud/`.
 
 ## Lighting
 
@@ -107,6 +108,7 @@ gets dark, with a faint glow around you.
 | `--roll 0` | turn off the view leaning when you strafe |
 | `--light off` | turn off the lighting (everything evenly lit, as in 1994) |
 | `--ambient 0.5` | make unlit areas brighter (0 to 1, default 0.35) |
+| `--hit-flash off` | no red flash around the screen edges when you get hurt |
 
 Put an option at the end of the play command, for example
 `./build/nitemare3d --data original/data --classic`. Every other option is

@@ -970,7 +970,8 @@ static void usage(const char *argv0) {
             "  --bob F      Quake-style view and weapon bob while moving: 0 off, 1 default, 2 double\n"
             "  --roll DEG   Quake-style view roll into sideways motion, degrees at walking speed (default 2, 0 off)\n"
             "  --light on|off  dynamic lighting from the level's lamps, chandeliers, candles and fires (default on)\n"
-            "  --ambient F  brightness away from any light, 0..1 (default 0.35)\n",
+            "  --ambient F  brightness away from any light, 0..1 (default 0.35)\n"
+            "  --hit-flash on|off  red flash around the screen edges when hurt (default on)\n",
             argv0);
 }
 
@@ -1170,6 +1171,12 @@ int main(int argc, char **argv) {
             else { usage(argv[0]); return 1; }
         }
         else if (!strcmp(argv[i], "--ambient") && i + 1 < argc) light_ambient = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--hit-flash") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "on")) hd_hit_flash = 1;
+            else if (!strcmp(v, "off")) hd_hit_flash = 0;
+            else { usage(argv[0]); return 1; }
+        }
         else if (!strcmp(argv[i], "--classic")) { res_mode = RES_FIXED; render_w = 320; render_h = 200; }
         else if (!strcmp(argv[i], "--res") && i + 1 < argc) {
             const char *r = argv[++i];
