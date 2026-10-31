@@ -86,7 +86,10 @@ repository.
    build\Release\nitemare3d.exe --data original\data
    ```
 
-On Windows the game draws with Direct3D 12.
+On Windows the game draws with Direct3D 12 and starts in borderless full
+screen at your desktop resolution, like the Mac app (`--windowed` for a
+window). For the redrawn title screen and main menu, put an `hdpack` folder
+made by `re/upscale/pack.py` next to `nitemare3d.exe`.
 
 You can build on Linux too. See [docs/TECHNICAL.md](docs/TECHNICAL.md) for how.
 
@@ -121,6 +124,7 @@ little. The HUD art is in `assets/hud/`.
 | Option | What it does |
 | --- | --- |
 | `--fullscreen` | start in full screen |
+| `--windowed` | start in a window (the Windows build starts in full screen) |
 | `--classic` | the original 320×200 look |
 | `--soundfont FILE.sf2` | better music, using any General MIDI SoundFont |
 | `--fm` | the 1994 Sound Blaster music sound |
