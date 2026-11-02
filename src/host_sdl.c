@@ -1092,6 +1092,7 @@ static void main_iteration(void) {
     presented = 0;
     net_poll();
     rt_callf(G_ON_IDLE, 0, NULL);
+    net_poll(); /* answer pings and pick up input without waiting a whole loop */
     if (hd_view_live()) {
         /* The game draws 25 frames a second; the hi-res view is shown at a
          * steady --fps (0: every display refresh), each frame drawn with

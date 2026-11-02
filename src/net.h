@@ -46,6 +46,9 @@ void net_sound(const uint16_t args[3]);
 int net_message(uint32_t text, uint16_t arg); /* modal message for the remote player: 1 = sent there */
 int net_remote_input(int *forward, int *strafe); /* modern input of the remote player */
 
+/* Status lines for the on-screen co-op panel (pointers stay valid until the next call). */
+int net_status(const char **lines, int max);
+
 /* The other player, for the hi-res renderer: a sprite object to draw at x, y. */
 int net_peer(uint32_t *obj, double *x, double *y);
 /* Its picture when it is not one of the level's art (else NULL): column-major w x h pixels and a cache key. */

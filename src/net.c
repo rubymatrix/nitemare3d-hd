@@ -29,6 +29,7 @@ void net_player_ticked(void) {}
 void net_logic_ticked(uint16_t lo, uint16_t hi) { (void)lo; (void)hi; }
 void net_client_frame(void) {}
 void net_view_begin(void) {}
+int net_status(const char **lines, int max) { (void)lines; (void)max; return 0; }
 void net_view_end(void) {}
 void net_client_projectiles(void) {}
 void net_level_loaded(void) {}
@@ -55,6 +56,8 @@ typedef SOCKET sock_t;
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <sys/socket.h>
 #include <unistd.h>
 typedef int sock_t;
@@ -180,9 +183,9 @@ static sock_t listen_sock = BAD_SOCK, peer = BAD_SOCK;
 static uint8_t *inbuf, *outbuf;
 static size_t in_len, in_cap, out_len, out_cap;
 
-enum { M_HELLO = 1, M_WELCOME, M_LEVEL, M_SNAP, M_INPUT, M_MSG, M_BYE };
+enum { M_HELLO = 1, M_WELCOME, M_LEVEL, M_SNAP, M_INPUT, M_MSG, M_BYE, M_PING, M_PONG };
 #define NET_MAGIC 0x504d334eu /* "N3MP" */
-#define NET_VERSION 1
+#define NET_VERSION 2
 
 static void set_nonblocking(sock_t s) {
 #ifdef _WIN32
@@ -328,12 +331,15 @@ static void snapq_clear(void);
 static void host_send_level(void);
 
 static int leaving; /* client left on its own: no "disconnected" box */
+static int host_port, rtt_ms = -1;
+static uint32_t last_ping_ms, last_snap_rx_ms, peer_since_ms;
 
 static void drop_peer(const char *why) {
     if (peer == BAD_SOCK) return;
     sock_close(peer);
     peer = BAD_SOCK;
     in_len = out_len = 0;
+    rtt_ms = -1;
     fprintf(stderr, "net: %s\n", why);
     if (role == 1) {
         if (cur != 0) swap_to(0);
@@ -367,6 +373,7 @@ int net_host(int port) {
     }
     set_nonblocking(listen_sock);
     role = 1;
+    host_port = port;
     fprintf(stderr, "net: hosting co-op on port %d\n", port);
     host_set_title("Nitemare-3D (hosting, waiting for a player)");
     return 1;
@@ -499,6 +506,8 @@ static void accept_peer(void) {
     peer = s;
     in_len = out_len = 0;
     rin.have = 0;
+    rtt_ms = -1;
+    peer_since_ms = host_ticks_ms();
     fprintf(stderr, "net: player 2 connected\n");
 }
 
@@ -1056,6 +1065,13 @@ int net_peer(uint32_t *obj, double *x, double *y) {
 
 /* ---------------------------------------------------------------- loop */
 static void handle(uint8_t type, rd_t *r) {
+    if (type == M_PING) { uint32_t t = get32(r); msg_begin(M_PONG); put32(t); msg_end(); return; }
+    if (type == M_PONG) {
+        int rtt = (int)(host_ticks_ms() - get32(r));
+        rtt_ms = rtt_ms < 0 ? rtt : (rtt_ms * 3 + rtt) / 4;
+        return;
+    }
+    if (role == 2 && type == M_SNAP) last_snap_rx_ms = host_ticks_ms();
     if (role == 1) {
         switch (type) {
         case M_HELLO:
@@ -1131,6 +1147,13 @@ void net_poll(void) {
         if (have_level && !in_level()) have_level = 0; /* host went back to the menu */
     }
     if (peer == BAD_SOCK) return;
+    if (host_ticks_ms() - last_ping_ms >= 1000) {
+        last_ping_ms = host_ticks_ms();
+        msg_begin(M_PING);
+        put32(last_ping_ms);
+        msg_end();
+        if (peer == BAD_SOCK) return;
+    }
     flush_out();
     for (;;) {
         if (peer == BAD_SOCK) return;
@@ -1169,5 +1192,58 @@ void net_shutdown(void) {
     if (listen_sock != BAD_SOCK) sock_close(listen_sock);
     listen_sock = BAD_SOCK;
     role = 0;
+}
+
+/* ---------------------------------------------------------------- on-screen status */
+static const char *lan_address(void) {
+    static char addr[64];
+    static int done;
+    if (done) return addr[0] ? addr : NULL;
+    done = 1;
+#ifndef _WIN32
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) == 0) {
+        for (struct ifaddrs *i = list; i; i = i->ifa_next) {
+            if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET) continue;
+            const struct sockaddr_in *a = (const struct sockaddr_in *)i->ifa_addr;
+            if ((ntohl(a->sin_addr.s_addr) >> 24) == 127) continue;
+            inet_ntop(AF_INET, &a->sin_addr, addr, sizeof addr);
+            break;
+        }
+        freeifaddrs(list);
+    }
+#endif
+    return addr[0] ? addr : NULL;
+}
+
+int net_status(const char **lines, int max) {
+    static char buf[4][128];
+    int n = 0;
+    char ping[32] = "";
+    if (rtt_ms >= 0) snprintf(ping, sizeof ping, "  -  ping %d ms", rtt_ms);
+#define LINE(...) do { if (n < max && n < 4) { snprintf(buf[n], sizeof buf[n], __VA_ARGS__); lines[n] = buf[n]; n++; } } while (0)
+    if (role == 1) {
+        if (peer == BAD_SOCK) {
+            const char *ip = lan_address();
+            if (ip) LINE("Co-op host  -  %s port %d", ip, host_port);
+            else LINE("Co-op host  -  port %d", host_port);
+            LINE("Waiting for player 2 to join");
+        } else {
+            LINE("Co-op  -  player 2 connected%s", ping);
+            if (!in_level()) LINE("Start a game: player 2 joins your level");
+            else if (remote_ready && ctx[1].state != 1) LINE("Player 2 is down - respawning");
+        }
+    } else if (role == 2 && peer != BAD_SOCK) {
+        int playing = got_snapshot && in_level();
+        LINE("Co-op  -  connected to the host%s", ping);
+        if (!playing) LINE("Waiting for the host to start a level");
+        else {
+            if (host_ticks_ms() - last_snap_rx_ms > 1500) LINE("Host paused (menu or window in the background)");
+            if (my_state != 1) LINE("You are down - respawning");
+            else if (peer_state != 1) LINE("Player 1 is down");
+        }
+    }
+#undef LINE
+    return n;
 }
 #endif

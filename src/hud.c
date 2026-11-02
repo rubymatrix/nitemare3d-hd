@@ -185,14 +185,19 @@ static double draw_h(const img_t *m, double x, double y, double h) {
  * descenders hang from the x-height. */
 static const img_t *glyph_of(char c) { return (unsigned char)c < 128 && glyph[(unsigned char)c] && glyph[(unsigned char)c]->w ? glyph[(unsigned char)c] : NULL; }
 
+/* punctuation the font lacks, drawn as blocks */
+static int drawn_mark(char c) { return c == '.' || c == ':' || c == '-'; }
+
 static double text_width(const char *s, double size) {
     double k = size / glyph['0']->h, w = 0;
     for (; *s; s++) {
         const img_t *g = glyph_of(*s);
-        w += g ? g->w * k + size * 0.08 : size * 0.35;
+        w += g ? g->w * k + size * 0.08 : drawn_mark(*s) ? size * (*s == '-' ? 0.5 : 0.3) : size * 0.35;
     }
     return w;
 }
+
+static void fill(double x, double y, double w, double h, uint32_t c);
 
 /* size = digit height in pixels; y = baseline */
 static void text(const char *s, double x, double y, double size, int align /* -1 left, 0 centre, 1 right */) {
@@ -202,6 +207,16 @@ static void text(const char *s, double x, double y, double size, int align /* -1
     if (align == 0) x -= text_width(s, size) * 0.5;
     for (; *s; s++) {
         const img_t *g = glyph_of(*s);
+        if (!g && drawn_mark(*s)) {
+            double d = size * 0.13, w = *s == '-' ? size * 0.36 : d;
+            double ys[2] = {*s == '-' ? y - size * 0.45 : y - d, y - size * 0.55};
+            for (int k2 = 0; k2 < (*s == ':' ? 2 : 1); k2++) {
+                fill(x + size * 0.04 + size * 0.05, ys[k2] + size * 0.05, w, d, 0xa0000000u);
+                fill(x + size * 0.04, ys[k2], w, d, 0xffe8dcc0u);
+            }
+            x += *s == '-' ? size * 0.5 : size * 0.3;
+            continue;
+        }
         if (!g) { x += size * 0.35; continue; }
         double gw = g->w * k, gh = g->h * k;
         double gy = strchr("gjpqy", *s) ? y - xh : y - gh;
@@ -370,4 +385,17 @@ void hud_draw(uint32_t *out, int pitch, int w, int h) {
             x -= 12 * u;
         }
     }
+}
+
+void hud_status(uint32_t *out, int pitch, int w, int h, const char *const *lines, int n) {
+    if (n <= 0 || !glyph['0'] || !glyph['0']->h) return;
+    O = out; OP = pitch; OW = w; OH = h;
+    double u = h / 1080.0;
+    if (w / 1440.0 < u) u = w / 1440.0;
+    double size = 26 * u, lh = size * 1.6, m = 24 * u, pad = size * 0.6;
+    if (size < 9) { size = 9; lh = size * 1.6; pad = size * 0.6; }
+    double tw = 0;
+    for (int i = 0; i < n; i++) { double x = text_width(lines[i], size); if (x > tw) tw = x; }
+    fill(m, m, tw + 2 * pad, n * lh + pad, 0x99000000u);
+    for (int i = 0; i < n; i++) text(lines[i], m + pad, m + pad * 0.5 + (i + 1) * lh - lh * 0.3, size, -1);
 }

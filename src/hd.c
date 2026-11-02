@@ -1260,6 +1260,13 @@ static void hit_flash(uint32_t *out, int pitch) {
     hq_parallel(flash_rows, &j, out_h);
 }
 
+/* co-op status in the corner, over menus and play alike */
+static void net_panel(uint32_t *out, int pitch) {
+    const char *lines[4];
+    int n = net_status(lines, 4);
+    if (n) hud_status(out, pitch, out_w, out_h, lines, n);
+}
+
 void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, int pitch) {
     uint32_t lut[256];
     for (int i = 0; i < 256; i++) lut[i] = 0xff000000u | ((uint32_t)pal[i][0] << 16) | ((uint32_t)pal[i][1] << 8) | pal[i][2];
@@ -1302,7 +1309,7 @@ void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, 
         if (cj.tex) { cj.pic = ui->idx; cj.tw = pic->w; }
     }
     hq_parallel(compose_rows, &cj, out_h);
-    if (!use_hd) return;
+    if (!use_hd) { net_panel(out, pitch); return; }
     refresh_palette();
     /* overlays, each anchored to the matching part of the widened view */
     double shift[5] = {0, 0, RX0 - (ox + vx0 * kx), RX1 - (ox + (vx1 + 1) * kx), bob_wx * kx};
@@ -1354,4 +1361,5 @@ void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, 
     }
     hit_flash(out, pitch);
     if (full_hud) hud_draw(out, pitch, out_w, out_h);
+    net_panel(out, pitch);
 }
