@@ -29,6 +29,7 @@
 #include "hd_tex.h"
 #include "hd_pack.h"
 #include "hud.h"
+#include "video.h"
 #include "light.h"
 #include "net.h"
 
@@ -48,8 +49,8 @@
 #define DS_HWND_STATUS 0x00bc
 
 static SDL_Window *window;
-static SDL_Renderer *renderer;
-static SDL_Texture *texture;
+static const video_backend *video; /* puts frames on screen (src/video.h) */
+static int have_target;
 static SDL_AudioDeviceID audio_dev;
 static int quit_requested;
 static int window_active = 1;
@@ -77,19 +78,35 @@ enum { RES_FIXED, RES_WINDOW, RES_DESKTOP };
 static int res_mode = RES_WINDOW;
 static int render_w = 320, render_h = 200;
 
+/* --render-scale: the hi-res frame is drawn at this fraction of the window or
+ * desktop size and the video backend enlarges it. 0 = auto: full size up to
+ * about 2560x1080 worth of pixels, smaller beyond that, since every pixel is
+ * drawn on the CPU (3440x1440 with lighting does not hold 60 fps on 8 cores). */
+#define RENDER_SCALE_AUTO_PIXELS 2.8e6
+#ifdef _WIN32
+static double render_scale = 0;
+#else
+static double render_scale = 1;
+#endif
+
 static void setup_render_target(int w, int h) {
+    if (res_mode != RES_FIXED && !(w == 320 && h == 200)) {
+        double s = render_scale > 0 ? render_scale : (double)w * h > RENDER_SCALE_AUTO_PIXELS ? sqrt(RENDER_SCALE_AUTO_PIXELS / ((double)w * h)) : 1;
+        if (s < 1) {
+            w = (int)(w * s + 0.5);
+            h = (int)(h * s + 0.5);
+        }
+    }
     if (w < 64) w = 64;
     if (h < 48) h = 48;
-    if (w == render_w && h == render_h && texture) return;
+    if (w == render_w && h == render_h && have_target) return;
     render_w = w;
     render_h = h;
-    if (texture) SDL_DestroyTexture(texture);
-    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
     if (w == 320 && h == 200) {
-        SDL_RenderSetLogicalSize(renderer, 320, 240); /* non-square pixels: present at 4:3 */
+        have_target = video->set_source(w, h, 320, 240) == 0; /* non-square pixels: present at 4:3 */
         hd_set_output(0, 0);
     } else {
-        SDL_RenderSetLogicalSize(renderer, w, h);
+        have_target = video->set_source(w, h, w, h) == 0;
         hd_set_output(w, h);
     }
 }
@@ -97,7 +114,7 @@ static void setup_render_target(int w, int h) {
 static void follow_window_size(void) {
     if (res_mode != RES_WINDOW) return;
     int w, h;
-    if (SDL_GetRendererOutputSize(renderer, &w, &h) == 0) setup_render_target(w, h);
+    if (video->output_size(&w, &h) == 0) setup_render_target(w, h);
 }
 
 /* ------------------------------------------------------------------ video */
@@ -122,13 +139,13 @@ static void redraw(void) {
     last_redraw_us = host_time_us();
     if (getenv("N3D_TURNLOG"))
         fprintf(stderr, "turn %u %.2f\n", SDL_GetTicks(), (int16_t)MEMR16(SEGLIN(RT_SEL_DS, 0x4bda)) + mouse_accum);
-    void *pixels;
+    uint32_t *pixels;
     int pitch;
     if (hd_enabled()) {
         uint64_t c0 = host_time_us();
-        if (SDL_LockTexture(texture, NULL, &pixels, &pitch) == 0) {
-            hd_compose(last_frame, (const uint8_t(*)[3])palette, pixels, pitch / 4);
-            SDL_UnlockTexture(texture);
+        if ((pixels = video->lock(&pitch))) {
+            hd_compose(last_frame, (const uint8_t(*)[3])palette, pixels, pitch);
+            video->unlock();
         }
         if (getenv("N3D_HDPROF")) {
             static uint64_t acc, first;
@@ -140,20 +157,18 @@ static void redraw(void) {
                 acc = 0; cnt = 0; first = host_time_us();
             }
         }
-    } else if (SDL_LockTexture(texture, NULL, &pixels, &pitch) == 0) {
+    } else if ((pixels = video->lock(&pitch))) {
         for (int y = 0; y < 200; y++) {
-            uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
+            uint32_t *row = pixels + y * pitch;
             const uint8_t *src = last_frame + y * 320;
             for (int x = 0; x < 320; x++) {
                 const uint8_t *c = palette[src[x]];
                 row[x] = 0xff000000u | ((uint32_t)c[0] << 16) | ((uint32_t)c[1] << 8) | c[2];
             }
         }
-        SDL_UnlockTexture(texture);
+        video->unlock();
     }
-    SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, texture, NULL, NULL);
-    SDL_RenderPresent(renderer);
+    video->present();
 }
 
 /* Debug aid: N3D_SHOTS=dir saves every 30th presented frame as BMP. */
@@ -331,7 +346,7 @@ void host_mouse_pos(int *x, int *y) {
     float lx, ly;
     SDL_GetMouseState(&mx, &my);
     if (rel_mode) { mx = vcur_x; my = vcur_y; } /* captured: menus use a virtual cursor */
-    SDL_RenderWindowToLogical(renderer, mx, my, &lx, &ly);
+    video->window_to_logical(mx, my, &lx, &ly);
     if (hd_enabled()) {
         hd_output_to_game((int)lx, (int)ly, x, y);
         return;
@@ -950,10 +965,27 @@ static void usage(const char *argv0) {
             "  --fm-driver FILE  FM synth plays like Windows 3.1's Ad Lib driver, patches from your MSADLIB.DRV\n"
             "  --res WxH    render resolution, e.g. 1920x1080, 3440x1440 (default: match window)\n"
             "  --res window | desktop   follow the window size / use the desktop resolution\n"
+#ifdef _WIN32
+            "  --render-scale F|auto   draw the hi-res frame at F x the window size, enlarged smoothly\n"
+            "               (default auto: full size up to about 2560x1080 worth of pixels)\n"
+#else
+            "  --render-scale F|auto   draw the hi-res frame at F x the window size, enlarged smoothly\n"
+            "               (default 1; auto: full size up to about 2560x1080 worth of pixels)\n"
+#endif
             "  --classic    original 320x200 frame, scaled (same as --res 320x200)\n"
             "  --scale N    initial window size: 320x240 * N\n"
+#ifdef _WIN32
+            "  --fullscreen / --windowed   start borderless fullscreen (default) or in a window (Alt+Enter toggles)\n"
+#else
             "  --fullscreen start in fullscreen (Alt+Enter toggles)\n"
+            "  --windowed   start in a window (the default)\n"
+#endif
+#ifdef N3D_D3D12
+            "  --renderer d3d12|direct3d11|opengl   video backend (default: d3d12, else SDL's choice)\n"
+#else
             "  --renderer metal|opengl   SDL render backend (default: SDL's choice)\n"
+#endif
+            "  --no-vsync   don't wait for the display refresh (with d3d12: tearing allowed, for VRR displays)\n"
             "  --no-spaces  macOS: fullscreen without a separate Space (can avoid tearing)\n"
             "  --hidpi / --no-hidpi  render at device pixels on HiDPI screens (default: on; off in the browser)\n"
             "  --sensitivity F  mouse look speed in degrees per mouse count (default 0.12)\n"
@@ -990,6 +1022,7 @@ static void host_shutdown(void) {
     rt_callf(G_SHUTDOWN, 0, NULL);
     if (audio_dev) SDL_CloseAudioDevice(audio_dev);
     if (wav_out) { wav_header(wav_out, wav_bytes); fclose(wav_out); }
+    if (video) video->shutdown();
     SDL_Quit();
     SDL_free(pref);
 #ifdef __EMSCRIPTEN__
@@ -1117,7 +1150,7 @@ int main(int argc, char **argv) {
     int net_port = 0;          /* --host */
     const char *net_addr = NULL; /* --join */
     const char *user_dir = NULL;
-    int scale = 3, force_fm = 0, no_spaces = 0;
+    int scale = 3, force_fm = 0, no_spaces = 0, vsync = 1;
     const char *renderer_name = NULL;
 #ifdef __EMSCRIPTEN__
     int hidpi = 0; /* full device-pixel resolution is opt-in: the renderer is single-threaded here */
@@ -1130,11 +1163,18 @@ int main(int argc, char **argv) {
     const char *hud_pak = getenv("N3D_HUD_PAK");
     int hud_on = 1;
     char game_args[256] = "";
+#ifdef _WIN32
+    /* Windows starts like the macOS app: borderless fullscreen at the desktop
+     * resolution with scale6x textures (--windowed for a window). */
+    fullscreen = 1;
+    hq.upscale = 6;
+#endif
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--data") && i + 1 < argc) data_dir = argv[++i];
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) user_dir = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
+        else if (!strcmp(argv[i], "--windowed")) fullscreen = 0;
         else if (!strcmp(argv[i], "--host")) {
             net_port = NET_DEFAULT_PORT;
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') net_port = atoi(argv[++i]);
@@ -1142,6 +1182,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--join") && i + 1 < argc) net_addr = argv[++i];
         else if (!strcmp(argv[i], "--renderer") && i + 1 < argc) renderer_name = argv[++i];
         else if (!strcmp(argv[i], "--no-spaces")) no_spaces = 1;
+        else if (!strcmp(argv[i], "--no-vsync")) vsync = 0;
         else if (!strcmp(argv[i], "--hidpi")) hidpi = 1;
         else if (!strcmp(argv[i], "--no-hidpi")) hidpi = 0;
         else if (!strcmp(argv[i], "--soundfont") && i + 1 < argc) soundfont = argv[++i];
@@ -1191,6 +1232,12 @@ int main(int argc, char **argv) {
             else { usage(argv[0]); return 1; }
         }
         else if (!strcmp(argv[i], "--classic")) { res_mode = RES_FIXED; render_w = 320; render_h = 200; }
+        else if (!strcmp(argv[i], "--render-scale") && i + 1 < argc) {
+            const char *v = argv[++i];
+            render_scale = strcmp(v, "auto") ? atof(v) : 0;
+            if (render_scale < 0 || render_scale > 1 || (render_scale == 0 && strcmp(v, "auto"))) { usage(argv[0]); return 1; }
+            if (render_scale > 0 && render_scale < 0.25) render_scale = 0.25;
+        }
         else if (!strcmp(argv[i], "--res") && i + 1 < argc) {
             const char *r = argv[++i];
             int w, h;
@@ -1207,8 +1254,25 @@ int main(int argc, char **argv) {
         } else { usage(argv[0]); return 1; }
     }
     if (scale < 1) scale = 1;
+#ifndef __EMSCRIPTEN__
+    char hd_pack_path[1200];
+    if (!hd_pack) { /* an hdpack folder next to the program, like hud.pak */
+        char *base = SDL_GetBasePath();
+        snprintf(hd_pack_path, sizeof hd_pack_path, "%shdpack", base ? base : "");
+        SDL_free(base);
+        FILE *idx;
+        char probe[1300];
+        snprintf(probe, sizeof probe, "%s/index.txt", hd_pack_path);
+        if ((idx = fopen(probe, "r"))) { fclose(idx); hd_pack = hd_pack_path; }
+    }
+#endif
     if (hd_pack) hd_pack_load(hd_pack);
     hud_set_enabled(hud_on);
+#ifdef _WIN32
+    /* HiDPI on Windows: per-monitor DPI aware, window sizes in scaled units
+     * like macOS, drawable size in device pixels */
+    if (hidpi) SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "1");
+#endif
 
 #ifdef __EMSCRIPTEN__
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
@@ -1252,8 +1316,7 @@ int main(int argc, char **argv) {
     }
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
-    if (renderer_name) SDL_SetHint(SDL_HINT_RENDER_DRIVER, renderer_name);
+    if (renderer_name && strcmp(renderer_name, "d3d12")) SDL_SetHint(SDL_HINT_RENDER_DRIVER, renderer_name);
     if (no_spaces) SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
     int win_w = 320 * scale, win_h = 240 * scale;
     {
@@ -1270,14 +1333,18 @@ int main(int argc, char **argv) {
     window = SDL_CreateWindow("Nitemare-3D", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, win_h,
                               SDL_WINDOW_RESIZABLE | (hidpi ? SDL_WINDOW_ALLOW_HIGHDPI : 0) | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     SDL_RaiseWindow(window); /* take focus so the mouse is captured from the start */
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!renderer) renderer = SDL_CreateRenderer(window, -1, 0);
-    if (getenv("N3D_DEBUG")) {
-        SDL_RendererInfo ri;
-        SDL_GetRendererInfo(renderer, &ri);
-        SDL_DisplayMode dm;
-        SDL_GetCurrentDisplayMode(0, &dm);
-        fprintf(stderr, "renderer: %s vsync=%d display %dx%d@%dHz\n", ri.name, (ri.flags & SDL_RENDERER_PRESENTVSYNC) != 0, dm.w, dm.h, dm.refresh_rate);
+#ifdef N3D_D3D12
+    if (!renderer_name || !strcmp(renderer_name, "d3d12")) {
+        if (video_d3d12.init(window, vsync) == 0) video = &video_d3d12;
+        else fprintf(stderr, "d3d12 unavailable, using SDL's renderer\n");
+    }
+#endif
+    if (!video) {
+        if (video_sdl.init(window, vsync) != 0) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nitemare-3D", SDL_GetError(), window);
+            return 1;
+        }
+        video = &video_sdl;
     }
     {
         int w = render_w, h = render_h;

@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows (Visual Studio, Direct3D 12)",
+      "description": "Native Windows build with MSVC; downloads SDL2 if it isn't installed",
+      "binaryDir": "${sourceDir}/build",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "cacheVariables": { "N3D_D3D12": "ON" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows",
+      "configurePreset": "windows",
+      "configuration": "Release"
+    }
+  ]
+}

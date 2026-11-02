@@ -59,7 +59,39 @@ repository.
    ./build/nitemare3d --data original/data
    ```
 
-You can build on Linux and Windows too. See [docs/TECHNICAL.md](docs/TECHNICAL.md) for how.
+## Build and play (Windows)
+
+1. Install Visual Studio 2022 or later with "Desktop development with C++",
+   plus Python 3, a JDK 21 and Ghidra 11.3 or later.
+
+2. In a Developer PowerShell, unpack the game files and convert the game:
+
+   ```powershell
+   python tools\extract_installer.py C:\path\to\win3_Nite3d3x.zip original
+   $env:GHIDRA_INSTALL_DIR = 'C:\path\to\ghidra_11.3.2_PUBLIC'
+   $env:JAVA_HOME = 'C:\path\to\jdk-21'
+   powershell -ExecutionPolicy Bypass -File tools\build_gen.ps1
+   ```
+
+3. Build it. SDL2 is downloaded for you:
+
+   ```powershell
+   cmake --preset windows
+   cmake --build --preset windows
+   ```
+
+4. Play:
+
+   ```powershell
+   build\Release\nitemare3d.exe --data original\data
+   ```
+
+On Windows the game draws with Direct3D 12 and starts in borderless full
+screen at your desktop resolution, like the Mac app (`--windowed` for a
+window). For the redrawn title screen and main menu, put an `hdpack` folder
+made by `re/upscale/pack.py` next to `nitemare3d.exe`.
+
+You can build on Linux too. See [docs/TECHNICAL.md](docs/TECHNICAL.md) for how.
 
 ## Controls
 
@@ -125,13 +157,16 @@ renderer (not `--classic`).
 | Option | What it does |
 | --- | --- |
 | `--fullscreen` | start in full screen |
+| `--windowed` | start in a window (the Windows build starts in full screen) |
 | `--classic` | the original 320×200 look |
 | `--soundfont FILE.sf2` | better music, using any General MIDI SoundFont |
 | `--fm` | the 1994 Sound Blaster music sound |
 | `--hud classic` | the original status bar instead of the new gothic HUD |
 | `--bob 0` | turn off the view and weapon bob while walking |
 | `--roll 0` | turn off the view leaning when you strafe |
+| `--no-vsync` | don't wait for the screen refresh (good with G-SYNC / FreeSync screens) |
 | `--light off` | turn off the lighting (everything evenly lit, as in 1994) |
+| `--render-scale 1` | draw the game at your full screen resolution (Windows draws very large screens a bit smaller and enlarges the picture, to keep 60 fps) |
 | `--ambient 0.5` | make unlit areas brighter (0 to 1, default 0.35) |
 | `--hit-flash off` | no red flash around the screen edges when you get hurt |
 

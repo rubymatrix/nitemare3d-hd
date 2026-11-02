@@ -25,7 +25,40 @@
 
 #include "rt/host.h"
 
-#if !defined(_MSC_VER)
+#if defined(_MSC_VER)
+/* MSVC has no pthreads: the few calls the worker pool uses, on Win32 primitives. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#define HQ_THREADS 1
+typedef SRWLOCK pthread_mutex_t;
+typedef CONDITION_VARIABLE pthread_cond_t;
+typedef HANDLE pthread_t;
+#define PTHREAD_MUTEX_INITIALIZER SRWLOCK_INIT
+#define PTHREAD_COND_INITIALIZER CONDITION_VARIABLE_INIT
+#define pthread_mutex_lock(m) AcquireSRWLockExclusive(m)
+#define pthread_mutex_unlock(m) ReleaseSRWLockExclusive(m)
+#define pthread_cond_wait(c, m) SleepConditionVariableSRW(c, m, INFINITE, 0)
+#define pthread_cond_broadcast(c) WakeAllConditionVariable(c)
+#define pthread_detach(t) CloseHandle(t)
+typedef struct { void *(*fn)(void *); void *arg; } thread_start_t;
+static DWORD WINAPI thread_start(LPVOID p) {
+    thread_start_t s = *(thread_start_t *)p;
+    free(p);
+    s.fn(s.arg);
+    return 0;
+}
+static int pthread_create(pthread_t *t, void *attr, void *(*fn)(void *), void *arg) {
+    (void)attr;
+    thread_start_t *s = malloc(sizeof *s);
+    if (!s) return -1;
+    s->fn = fn;
+    s->arg = arg;
+    *t = CreateThread(NULL, 0, thread_start, s, 0, NULL);
+    if (!*t) { free(s); return -1; }
+    return 0;
+}
+static long cpu_count(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (long)si.dwNumberOfProcessors; }
+#else
 #include <pthread.h>
 #if !defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_PTHREADS__)
 #define HQ_THREADS 1
