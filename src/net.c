@@ -372,7 +372,10 @@ int net_offscreen(void) { return offscreen_pass; }
 static void respawn(int i) {
     swap_to(i);
     pctx_t s = start_ctx[i];
+    uint8_t keys[2] = {ds8(0x4c18), ds8(0x4c19)}; /* keys are shared: keep the ones found since */
     memcpy(ds_ptr(PL_OFF), s.pl, PL_LEN);
+    wds8(0x4c18, keys[0]);
+    wds8(0x4c19, keys[1]);
     if (ds8(0x4c0d) < FULL_HEALTH) wds8(0x4c0d, FULL_HEALTH);
     wds16(0x4bfe, 0xffff);
     wds8(0x46a4, 1);
@@ -384,6 +387,42 @@ static void respawn(int i) {
     if (i == 0) call2(F_PALETTE_FX, 3, 0); /* out of the death colours */
     else epoch++;
     fprintf(stderr, "net: player %d respawned\n", i + 1);
+}
+
+/* Keys and keycards (DS:4c18/4c19) belong to both players: what either
+ * finds is the other's too, and a key either loses is gone for both. */
+static uint8_t shared_keys[2], shared_weapons;
+
+/* Give player i weapon w as picking it up does (FUN_1010_ceb2, item 0x36):
+ * own it, its ammo, and take it in hand if they had none. */
+static void grant_weapon(int i, int w) {
+    swap_to(i);
+    wds8(0x4c1a, (uint8_t)(ds8(0x4c1a) | 1 << w));
+    int unarmed = ds8(0x4c13) == 0xff;
+    call2(0x1010a932u, (uint16_t)w, 1);
+    if (unarmed) call1(0x1010aa38u, (uint16_t)w);
+    swap_to(0);
+}
+
+static void share_keys(void) {
+    if (!remote_ready || cur != 0) return;
+    /* weapons: one found is found for both */
+    uint8_t wa = ds8(0x4c1a), wb = ctx[1].pl[0x4c1a - PL_OFF];
+    for (int w = 0; w < 8; w++) {
+        uint8_t bit = (uint8_t)(1 << w);
+        if (shared_weapons & bit) continue;
+        if ((wa & bit) && !(wb & bit)) grant_weapon(1, w);
+        else if ((wb & bit) && !(wa & bit)) grant_weapon(0, w);
+    }
+    shared_weapons = (uint8_t)(ds8(0x4c1a) | ctx[1].pl[0x4c1a - PL_OFF]);
+    for (int k = 0; k < 2; k++) {
+        uint16_t off = (uint16_t)(0x4c18 + k);
+        uint8_t a = ds8(off), b = ctx[1].pl[off - PL_OFF], old = shared_keys[k];
+        uint8_t now = (uint8_t)((old & a & b) | ((a | b) & ~old));
+        shared_keys[k] = now;
+        wds8(off, now);
+        ctx[1].pl[off - PL_OFF] = now;
+    }
 }
 
 /* Remote player at this level's start: their own weapons and items, the
@@ -400,6 +439,10 @@ static void init_remote(int first) {
     r->edge[0] = r->edge[1] = 0;
     r->typed = 0;
     r->cool = 0xff;
+    start_ctx[1] = *r;
+    shared_keys[0] = r->pl[0x4c18 - PL_OFF] = ds8(0x4c18);
+    shared_keys[1] = r->pl[0x4c19 - PL_OFF] = ds8(0x4c19);
+    shared_weapons = (uint8_t)(ds8(0x4c1a) & r->pl[0x4c1a - PL_OFF]); /* the rest gets evened out */
     start_ctx[1] = *r;
     memset(guard_target, 0, sizeof guard_target);
     remote_ready = 1;
@@ -533,6 +576,7 @@ void net_logic_ticked(uint16_t lo, uint16_t hi) {
     call0(0x1010bdb4u);
     call2(0x1010a9e2u, 1, 0);
     swap_to(0);
+    share_keys();
 }
 
 void net_guard_begin(uint32_t obj) {
@@ -781,7 +825,9 @@ static void debug_log(void) {
     if (!on || host_ticks_ms() - last < 500) return;
     last = host_ticks_ms();
     if (role == 1)
-        fprintf(stderr, "netlog host: p2 weapon %d ammo %d %d %d | state %d hp %d at %d,%d a%d | p2 state %d hp %d at %d,%d a%d in(%02x %02x f%d s%d a%d) 46a6=%d hostkeys %02x %02x t%02x\n",
+        fprintf(stderr, "netlog host: weapons %02x w%d ammo %d | keys %02x/%02x p2 %02x/%02x | p2 weapons %02x weapon %d ammo %d %d %d | state %d hp %d at %d,%d a%d | p2 state %d hp %d at %d,%d a%d in(%02x %02x f%d s%d a%d) 46a6=%d hostkeys %02x %02x t%02x\n",
+                ds8(0x4c1a), (int8_t)ds8(0x4c13), ds8(0x4c10),
+                ds8(0x4c18), ds8(0x4c19), ctx[1].pl[0x4c18 - PL_OFF], ctx[1].pl[0x4c19 - PL_OFF], ctx[1].pl[0x4c1a - PL_OFF],
                 (int8_t)ctx[1].pl[0x4c13 - PL_OFF], ctx[1].pl[0x4c34 - PL_OFF], ctx[1].pl[0x4c0f - PL_OFF], ctx[1].pl[0x4c10 - PL_OFF],
                 ds8(0x46a4), ds8(0x4c0d), (int16_t)ds16(0x4be6), (int16_t)ds16(0x4be8), (int16_t)ds16(0x4bda),
                 ctx[1].state, ctx[1].pl[P_HEALTH], pl16(&ctx[1], P_X), pl16(&ctx[1], P_Y), pl16(&ctx[1], P_ANGLE),
@@ -798,6 +844,7 @@ void net_player_ticked(void) {
     if (ds8(0x46a4) == 3) respawn(0);
     if (!remote_ready) init_remote(1);
     remote_frame();
+    share_keys();
     send_snapshot();
 }
 
