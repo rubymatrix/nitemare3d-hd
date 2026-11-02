@@ -95,6 +95,31 @@ light falls on the walls, floor, ceiling and monsters around them, walls
 cast shadows, and candle and fire light flickers. Away from any light it
 gets dark, with a faint glow around you.
 
+## Play together (co-op)
+
+Two players can play the campaign together over a network. One player
+hosts, the other joins:
+
+```bash
+./build/nitemare3d --data original/data --host                # player 1
+./build/nitemare3d --data original/data --join 192.168.1.20   # player 2: the host's address
+```
+
+The host starts a game from the menu as usual, and player 2's game loads
+the same level and follows along from level to level. Both need the same
+game files. To play over the internet, the host forwards TCP port 5333 on
+their router to their computer, and player 2 joins with the host's public
+address (`--host 6000` and `--join ADDRESS:6000` use another port).
+
+Each player has their own health, ammo and powers and picks up what they
+walk over; keys and weapons are shared, so what one finds, both have.
+Monsters go after whoever is nearer. A player who dies comes back at the
+start of the level and the game goes on. You see the other player as the
+man in the green lab coat. A panel in the top corner shows the connection,
+the ping, and whether you're waiting for the host. Co-op is for the
+desktop versions only, and the other player and the panel need the new
+renderer (not `--classic`).
+
 ## Useful options
 
 | Option | What it does |

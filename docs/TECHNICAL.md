@@ -562,6 +562,47 @@ take `--sb`:
 ./build/nitemare3d --data original/data --fm --sb sb2 --music none
 ```
 
+## Two-player co-op
+
+`--host [PORT]` (default 5333) and `--join HOST[:PORT]`, TCP. Code in
+`src/net.c`, hooks in `src/rt/overrides.c` (list in `src/rt/overrides.txt`;
+regenerate `src/gen/` with `tools/recomp.py` after changing it).
+
+* **One simulation.** The host runs the game. It keeps a context for each
+  player: the player record `DS:4bd8` (0x62 bytes, as the save game stores
+  it, plus the view cos/sin), the key bits `DS:3752/3753`, the use/fire edge
+  state `DS:012c/012d`, the typed key `DS:0108`, the play state `DS:46a4`,
+  `DS:469c` and the weapon cooldown `DS:01fa`. Player 2's context is swapped
+  into the globals around their view pass (`FUN_1018_387e`, `1010_61c2`,
+  `1010_660c`, `1010_62a4`: it marks the guards they can shoot), dying turn
+  and player tick, their share of the logic tick (`FUN_1010_ba78` powers,
+  `1010_bdb4` floor damage, `1010_a9e2(1)` weapon cooldown), the weapon
+  raise/switch/recoil steps that `FUN_1010_a220` does while drawing, and the
+  AI of every guard (`FUN_1010_7ab2`) that chases them; each guard chases the
+  nearer player. HUD painting (`FUN_1010_a308`) and palette effects
+  (`FUN_1010_b0f6`) are skipped for player 2's context; notes they read
+  (`FUN_1018_06e6`) open on their screen.
+* **Shared and own.** Keys/keycards (`DS:4c18/4c19`) and weapons
+  (`DS:4c1a`, with the weapon's ammo through `FUN_1010_a932`) are merged
+  between the players after every frame; everything else in the record is
+  each player's own. Dead players respawn at the level start with full health.
+* **The client** loads the host's level through the menu command
+  (`FUN_1018_26ac` 0x15..0x17), then mirrors after every host frame segment
+  1040 (walls, objects, guards, doors, map) and a few DS globals (projectiles,
+  switches, counts, darkening remap, object list) as delta records, its own
+  player record and the sounds played (`FUN_1010_e2a4`). It never runs game
+  logic (`FUN_1010_d8c6`, doors, projectiles and the player tick are
+  replaced); it draws and sends keys, W/A/S/D and its own view angle, so
+  turning has no network delay. Snapshots are applied one per drawn frame
+  with one in reserve. Object animation stays local except for guards, whose
+  frames are their state; each screen turns guards to face where they go as
+  seen from that viewer (`FUN_1010_6e3c`).
+* **The other player** is drawn by the hi-res renderer as the green lab-coat
+  man, read from `IMG.1` (episode 3's `IMG.3` lacks him): 8 directions of 4
+  walking frames, chosen from the player's view angle.
+* `N3D_NETLOG=1` logs both players twice a second; `N3D_NETWARP=x,y` puts
+  player 2 at a map position when they join (testing).
+
 ## macOS app bundle
 
 `tools/make_macos_app.sh [ICON_1024.png] [HDPACK_DIR]` builds a self-contained
