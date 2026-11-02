@@ -36,6 +36,7 @@ add_executable(nitemare3d
   src/hd.c
   src/hd_tex.c
   src/hd_pack.c
+  src/net.c
   src/hud.c
   src/light.c
   ${GEN_SOURCES})
@@ -106,6 +107,7 @@ endif()
 
 if(WIN32)
   set_target_properties(nitemare3d PROPERTIES WIN32_EXECUTABLE TRUE)
+  target_link_libraries(nitemare3d PRIVATE ws2_32)
 endif()
 
 if(MSVC)

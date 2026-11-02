@@ -27,6 +27,7 @@
 #include "hd_pack.h"
 #include "hud.h"
 #include "light.h"
+#include "net.h"
 #include "rt/rt.h"
 #include "rt/host.h"
 
@@ -770,6 +771,13 @@ static void render_sprites(const cam_t *cam) {
         list[n].x = x;
         list[n].y = y;
         n++;
+    }
+    { /* the other co-op player */
+        uint32_t po;
+        double x, y;
+        if (net_peer(&po, &x, &y)) {
+            list[n].obj = po; list[n].x = x; list[n].y = y; n++;
+        }
     }
     if (light_pass) { /* every light in the level, seen or not: it may light what is */
         light_begin();

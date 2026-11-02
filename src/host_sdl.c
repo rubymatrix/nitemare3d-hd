@@ -30,6 +30,7 @@
 #include "hd_pack.h"
 #include "hud.h"
 #include "light.h"
+#include "net.h"
 
 /* Game entry points in the recompiled code (see re/names.txt). */
 #define G_INIT_INSTANCE 0x101010ccu /* parse command line + initialise all subsystems */
@@ -343,7 +344,7 @@ void host_mouse_pos(int *x, int *y) {
     if (*y > 199) *y = 199;
 }
 
-int host_is_active(void) { return window_active; }
+int host_is_active(void) { return window_active || net_is_host() || net_is_client(); } /* co-op keeps running in the background */
 
 /* ---- modern controls: W/A/S/D, mouse look, mouse buttons ---- */
 static int mouselook = 1;          /* --no-mouselook disables */
@@ -971,7 +972,9 @@ static void usage(const char *argv0) {
             "  --roll DEG   Quake-style view roll into sideways motion, degrees at walking speed (default 2, 0 off)\n"
             "  --light on|off  dynamic lighting from the level's lamps, chandeliers, candles and fires (default on)\n"
             "  --ambient F  brightness away from any light, 0..1 (default 0.35)\n"
-            "  --hit-flash on|off  red flash around the screen edges when hurt (default on)\n",
+            "  --hit-flash on|off  red flash around the screen edges when hurt (default on)\n"
+            "  --host [PORT]  host a two-player co-op game (default port 5333); start a level as usual\n"
+            "  --join HOST[:PORT]  join a co-op game; the host's level starts here\n",
             argv0);
 }
 
@@ -980,6 +983,7 @@ static char *pref;
 static uint32_t start_ticks;
 
 static void host_shutdown(void) {
+    net_shutdown();
     static int done;
     if (done) return;
     done = 1;
@@ -1086,6 +1090,7 @@ static void main_iteration(void) {
     update_mouse_mode();
     pad_poll();
     presented = 0;
+    net_poll();
     rt_callf(G_ON_IDLE, 0, NULL);
     if (hd_view_live()) {
         /* The game draws 25 frames a second; the hi-res view is shown at a
@@ -1108,6 +1113,8 @@ static void main_iteration(void) {
 
 int main(int argc, char **argv) {
     const char *data_dir = "data";
+    int net_port = 0;          /* --host */
+    const char *net_addr = NULL; /* --join */
     const char *user_dir = NULL;
     int scale = 3, force_fm = 0, no_spaces = 0;
     const char *renderer_name = NULL;
@@ -1127,6 +1134,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) user_dir = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
+        else if (!strcmp(argv[i], "--host")) {
+            net_port = NET_DEFAULT_PORT;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') net_port = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--join") && i + 1 < argc) net_addr = argv[++i];
         else if (!strcmp(argv[i], "--renderer") && i + 1 < argc) renderer_name = argv[++i];
         else if (!strcmp(argv[i], "--no-spaces")) no_spaces = 1;
         else if (!strcmp(argv[i], "--hidpi")) hidpi = 1;
@@ -1310,6 +1322,14 @@ int main(int argc, char **argv) {
         rt_callf(G_INIT_INSTANCE, 3, a);
     }
     ds_w16(DS_HWND_MAIN, 0x0100);
+    if (net_port && !net_host(net_port)) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nitemare-3D", "Can't host: the port is in use.", window);
+        return 1;
+    }
+    if (net_addr && !net_join(net_addr)) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nitemare-3D", "Can't connect to the co-op host.", window);
+        return 1;
+    }
     script_parse();
     script_mouse_parse();
     start_ticks = SDL_GetTicks();
