@@ -404,6 +404,12 @@ static void init_remote(int first) {
     memset(guard_target, 0, sizeof guard_target);
     remote_ready = 1;
     epoch++;
+    int wx, wy; /* testing aid: N3D_NETWARP=x,y puts player 2 there */
+    if (getenv("N3D_NETWARP") && sscanf(getenv("N3D_NETWARP"), "%d,%d", &wx, &wy) == 2) {
+        swap_to(1);
+        call2(F_SET_POS, (uint16_t)wx, (uint16_t)wy);
+        swap_to(0);
+    }
 }
 
 static void host_send_level(void) {
@@ -444,11 +450,34 @@ static void accept_peer(void) {
     fprintf(stderr, "net: player 2 connected\n");
 }
 
+/* What FUN_1010_a220 (draw the weapon) does to the weapon state besides
+ * drawing it: raise the new weapon, finish a switch, end the recoil. The host
+ * never draws the remote player's weapon, so it steps it here. */
+static void remote_weapon_step(void) {
+    if (ds8(0x4c13) == 0xff) return;
+    int16_t mode = (int16_t)ds16(0x4c2a), pos = (int16_t)ds16(0x4c2c);
+    if (mode == 0) wds8(0x4c20, 0);
+    else if (mode == 1) {
+        pos++;
+        wds16(0x4c2c, (uint16_t)pos);
+        if (pos == (int16_t)ds16(0x01f2)) wds16(0x4c2a, 0);
+    } else if (mode == 2) {
+        pos--;
+        wds16(0x4c2c, (uint16_t)pos);
+        if (pos == 0) {
+            wds16(0x4c2a, 1);
+            wds8(0x4c13, ds8(0x4c14));
+            wds16(0x4c16, ds8(0x4c14) == 2 ? 1 : 2);
+        }
+    }
+}
+
 /* The remote player's frame: their view (it marks the guards they can shoot),
  * dying turn, and tick, all with their context in the globals. */
 static void remote_frame(void) {
     if (ctx[1].state == 3) respawn(1);
     swap_to(1);
+    remote_weapon_step(); /* where the host draws its own weapon, before the tick */
     if (ds8(0x46a4) == 1 && rin.have) call1(F_SET_ANGLE, (uint16_t)rin.angle);
     wds8(0x3752, rin.keys0);
     wds8(0x3753, rin.keys1);
@@ -649,17 +678,17 @@ static void client_snapshot(rd_t *r) {
  * the object is; guards (8/4-direction figures) follow the host. */
 static void apply_world(void) {
     uint8_t *w = world_ptr(0), *sh = shadow[0];
-    static uint8_t keep[OBJ_MAX][10];
+    static uint8_t keep[OBJ_MAX][6]; /* +2 sequence, +3 frame, +8..+0xb next step time */
     static uint8_t keepok[OBJ_MAX];
     for (int i = 0; i < OBJ_MAX; i++) {
         const uint8_t *o = w + OBJ_BASE + i * OBJ_SIZE, *h = sh + OBJ_BASE + i * OBJ_SIZE;
         keepok[i] = o[4] == h[4] && o[6] == h[6] && h[6] != 0x2c && h[6] != 0x2d;
-        if (keepok[i]) memcpy(keep[i], o + 2, 10);
+        if (keepok[i]) { memcpy(keep[i], o + 2, 2); memcpy(keep[i] + 2, o + 8, 4); }
     }
     memcpy(w, sh, WORLD_LEN);
     for (int i = 0; i < OBJ_MAX; i++) {
         uint8_t *o = w + OBJ_BASE + i * OBJ_SIZE;
-        if (keepok[i]) memcpy(o + 2, keep[i], 10);
+        if (keepok[i]) { memcpy(o + 2, keep[i], 2); memcpy(o + 8, keep[i] + 2, 4); }
         else { uint32_t t; memcpy(&t, o + 8, 4); t += (uint32_t)clock_delta; memcpy(o + 8, &t, 4); }
     }
     for (int r = 1; r < NREG; r++) memcpy(reg_live(r), shadow[r], regions[r].len);
@@ -752,7 +781,8 @@ static void debug_log(void) {
     if (!on || host_ticks_ms() - last < 500) return;
     last = host_ticks_ms();
     if (role == 1)
-        fprintf(stderr, "netlog host: state %d hp %d at %d,%d a%d | p2 state %d hp %d at %d,%d a%d in(%02x %02x f%d s%d a%d) 46a6=%d hostkeys %02x %02x t%02x\n",
+        fprintf(stderr, "netlog host: p2 weapon %d ammo %d %d %d | state %d hp %d at %d,%d a%d | p2 state %d hp %d at %d,%d a%d in(%02x %02x f%d s%d a%d) 46a6=%d hostkeys %02x %02x t%02x\n",
+                (int8_t)ctx[1].pl[0x4c13 - PL_OFF], ctx[1].pl[0x4c34 - PL_OFF], ctx[1].pl[0x4c0f - PL_OFF], ctx[1].pl[0x4c10 - PL_OFF],
                 ds8(0x46a4), ds8(0x4c0d), (int16_t)ds16(0x4be6), (int16_t)ds16(0x4be8), (int16_t)ds16(0x4bda),
                 ctx[1].state, ctx[1].pl[P_HEALTH], pl16(&ctx[1], P_X), pl16(&ctx[1], P_Y), pl16(&ctx[1], P_ANGLE),
                 rin.keys0, rin.keys1, rin.forward, rin.strafe, rin.angle, ds16(0x46a6), ds8(0x3752), ds8(0x3753), ds8(0x0108));
