@@ -317,6 +317,13 @@ static int16_t peer_x, peer_y, peer_angle;
 static uint8_t peer_state;
 static int peer_known;
 static uint8_t prev_powers;
+static int snaps_since_frame, snap_hist[4];
+/* Snapshots wait here and are applied one per drawn frame: they arrive
+ * unevenly (some frames none, some two), which made everything hitch. */
+#define SNAPQ 32
+static struct { uint8_t *data; size_t len; } snapq[SNAPQ];
+static int snapq_head, snapq_n, snap_waited;
+static void snapq_clear(void);
 
 static void host_send_level(void);
 
@@ -685,6 +692,7 @@ static void client_start_level(void) {
     wds16(0x46a6, 1);
     wds8(0x46a4, 1);
     reset_shadows();
+    snapq_clear();
     got_snapshot = 0;
     my_epoch = 0xffff;
     peer_known = 0;
@@ -717,6 +725,7 @@ static void client_snapshot(rd_t *r) {
         local_angle = pl16(&me, P_ANGLE);
     }
     got_snapshot = 1;
+    snaps_since_frame++;
 }
 
 /* Object animation is the client's own (it is drawn here, in the host's
@@ -811,8 +820,30 @@ void net_view_end(void) { /* the AI goes on from what it set for its target */
     gv_n = 0;
 }
 
+static void snapq_apply_one(void) {
+    rd_t q = {snapq[snapq_head].data, snapq[snapq_head].data + snapq[snapq_head].len};
+    client_snapshot(&q);
+    free(snapq[snapq_head].data);
+    snapq_head = (snapq_head + 1) % SNAPQ;
+    snapq_n--;
+}
+
+static void snapq_clear(void) {
+    while (snapq_n) { free(snapq[snapq_head].data); snapq_head = (snapq_head + 1) % SNAPQ; snapq_n--; }
+    snap_waited = 0;
+}
+
 void net_client_frame(void) {
-    if (!net_is_client() || !got_snapshot) return;
+    if (!net_is_client()) return;
+    /* one per frame, one kept in reserve against late ones; catch up if they pile up */
+    if (snapq_n >= 2 || (snapq_n == 1 && (snap_waited || !got_snapshot))) { snapq_apply_one(); snap_waited = 0; }
+    else snap_waited = 1;
+    while (snapq_n > 3) snapq_apply_one();
+    if (!got_snapshot) return;
+    snap_hist[snaps_since_frame > 3 ? 3 : snaps_since_frame]++;
+    snaps_since_frame = 0;
+    if (getenv("N3D_NETLOG") && (snap_hist[0] + snap_hist[1] + snap_hist[2] + snap_hist[3]) % 100 == 0)
+        fprintf(stderr, "netlog snapshots per frame: 0:%d 1:%d 2:%d 3+:%d\n", snap_hist[0], snap_hist[1], snap_hist[2], snap_hist[3]);
     apply_world();
     memcpy(ds_ptr(PL_OFF), me.pl, PL_LEN);
     wds8(0x01fa, me.cool);
@@ -1061,7 +1092,21 @@ static void handle(uint8_t type, rd_t *r) {
         level_pending = 1;
         break;
     case M_SNAP:
-        if (!level_pending) client_snapshot(r);
+        if (level_pending) break;
+        if (snapq_n == SNAPQ) { /* far behind: take the oldest now */
+            rd_t q = {snapq[snapq_head].data, snapq[snapq_head].data + snapq[snapq_head].len};
+            client_snapshot(&q);
+            free(snapq[snapq_head].data);
+            snapq_head = (snapq_head + 1) % SNAPQ;
+            snapq_n--;
+        }
+        {
+            int at = (snapq_head + snapq_n) % SNAPQ;
+            snapq[at].len = (size_t)(r->end - r->p);
+            snapq[at].data = malloc(snapq[at].len ? snapq[at].len : 1);
+            memcpy(snapq[at].data, r->p, snapq[at].len);
+            snapq_n++;
+        }
         break;
     case M_MSG: {
         uint16_t arg = get16(r);
