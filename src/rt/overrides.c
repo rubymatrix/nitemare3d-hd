@@ -150,6 +150,13 @@ void f_1010_7ab2(void) {
     net_guard_end();
 }
 
+/* 1010:ceb2 pick up the item in a map cell: on the co-op client the host
+ * does it (its world and our player record arrive with the next snapshot). */
+void f_1010_ceb2(void) {
+    if (net_is_client()) { retf(); return; }
+    f_1010_ceb2_orig();
+}
+
 /* 1010:d8c6 logic tick (frame number): guards, powers, floor damage, weapon cooldown. */
 void f_1010_d8c6(void) {
     if (net_is_client()) { retf(); return; }

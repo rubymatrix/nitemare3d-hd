@@ -6,6 +6,7 @@
 1010:9758 wrap  # player tick: add WASD movement/strafe and mouse turning on top of the original controls
 1010:cbce wrap  # queue an object sprite: remember which objects the original animated this frame
 1010:7ab2 wrap  # guard AI: co-op swaps in the player the guard chases
+1010:ceb2 wrap  # pick up an item: co-op client skips it (the host picks up for player 2)
 1010:d8c6 wrap  # logic tick: co-op client skips it; host runs the remote player's share
 1010:d84e wrap  # dying turn (first thing of a drawn frame): co-op client applies the host's state here
 1010:1db4 wrap  # move doors: not on a co-op client
