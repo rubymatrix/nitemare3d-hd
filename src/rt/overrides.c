@@ -20,6 +20,7 @@ static uint16_t arg16(int i) { return MEMR16(SEGLIN(rSS, (uint16_t)(rSP + 4 + 2 
  * targeting), then the native renderer gets a chance to snapshot it. */
 void f_1010_d6de(void) {
     RT_ENTER(0x1010d6deu);
+    net_view_begin();
     hd_view_begin();
     MEMW32(SEGLIN(RT_SEL_DS, 0x53cc), MEMR32(SEGLIN(RT_SEL_DS, 0x53cc)) + 1);
     rt_callf(0x1018387eu, 0, NULL); /* collect visible vectors per column */
@@ -32,6 +33,7 @@ void f_1010_d6de(void) {
     rt_callf(0x101062a4u, 0, NULL); /* queue visible objects */
     rt_callf(0x10106870u, 0, NULL); /* draw queued sprites */
     hd_view_drawn();
+    net_view_end();
     retf();
 }
 

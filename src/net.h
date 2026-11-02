@@ -35,6 +35,8 @@ int net_offscreen(void);               /* host: drawing the remote player's view
 void net_player_ticked(void);          /* end of FUN_1010_9758 (one per drawn frame) */
 void net_logic_ticked(uint16_t lo, uint16_t hi); /* after FUN_1010_d8c6 (host) */
 void net_client_frame(void);           /* client: before the view is drawn */
+void net_view_begin(void);             /* host: around drawing its own view, guards face the host */
+void net_view_end(void);
 void net_client_projectiles(void);     /* client: queue projectile sprites like FUN_1010_9d72 */
 void net_level_loaded(void);           /* after FUN_1018_08c0 */
 void net_guard_begin(uint32_t obj);    /* around FUN_1010_7ab2: chase the nearest player */

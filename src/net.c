@@ -28,6 +28,8 @@ int net_offscreen(void) { return 0; }
 void net_player_ticked(void) {}
 void net_logic_ticked(uint16_t lo, uint16_t hi) { (void)lo; (void)hi; }
 void net_client_frame(void) {}
+void net_view_begin(void) {}
+void net_view_end(void) {}
 void net_client_projectiles(void) {}
 void net_level_loaded(void) {}
 void net_guard_begin(uint32_t obj) { (void)obj; }
@@ -719,14 +721,20 @@ static void client_snapshot(rd_t *r) {
 
 /* Object animation is the client's own (it is drawn here, in the host's
  * absence too): keep our frame and timing where the host didn't change what
- * the object is; guards (8/4-direction figures) follow the host. */
+ * the object is; guards and 8/4-direction figures follow the host. */
 static void apply_world(void) {
     uint8_t *w = world_ptr(0), *sh = shadow[0];
     static uint8_t keep[OBJ_MAX][6]; /* +2 sequence, +3 frame, +8..+0xb next step time */
-    static uint8_t keepok[OBJ_MAX];
+    static uint8_t keepok[OBJ_MAX], guard[OBJ_MAX];
+    memset(guard, 0, sizeof guard); /* guards' frames are their state (walking, shooting, dying): the host's */
+    int ng = (int16_t)(shadow[3][0x7e4e - 0x7e42] | shadow[3][0x7e4f - 0x7e42] << 8);
+    for (int g = 0; g < ng && g < 200; g++) {
+        int idx = (int16_t)(sh[GUARD_BASE + g * 0x1a + 8] | sh[GUARD_BASE + g * 0x1a + 9] << 8);
+        if (idx >= 0 && idx < OBJ_MAX) guard[idx] = 1;
+    }
     for (int i = 0; i < OBJ_MAX; i++) {
         const uint8_t *o = w + OBJ_BASE + i * OBJ_SIZE, *h = sh + OBJ_BASE + i * OBJ_SIZE;
-        keepok[i] = o[4] == h[4] && o[6] == h[6] && h[6] != 0x2c && h[6] != 0x2d;
+        keepok[i] = !guard[i] && o[4] == h[4] && o[6] == h[6] && h[6] != 0x2c && h[6] != 0x2d;
         if (keepok[i]) { memcpy(keep[i], o + 2, 2); memcpy(keep[i] + 2, o + 8, 4); }
     }
     memcpy(w, sh, WORLD_LEN);
@@ -742,6 +750,67 @@ static void apply_world(void) {
     }
 }
 
+/* Guards are drawn facing where they go: FUN_1010_6e3c picks the walking/
+ * shooting loop for the direction they face seen from "the player" (the
+ * one they chase). For everyone else that is the wrong side of them, so each
+ * screen picks the loop again for its own viewer, keeping the step in it. */
+typedef struct { uint32_t obj; uint16_t g; uint8_t frame, start, count, dir; } guard_view_t;
+static guard_view_t gv_saved[200];
+static int gv_n;
+
+static int guard_view(int i, guard_view_t *old) {
+    uint16_t g = (uint16_t)(GUARD_BASE + i * 0x1a);
+    uint32_t gl = SEGLIN(SEL_WORLD, g);
+    int idx = (int16_t)MEMR16(gl + 8);
+    if (idx < 0 || idx >= OBJ_MAX) return 0;
+    uint32_t o = SEGLIN(SEL_WORLD, OBJ_BASE + idx * OBJ_SIZE);
+    uint16_t tbl = ds16((uint16_t)(0x4738 + MEMR8(o + 4) * 8));
+    uint8_t start = MEMR8(gl), count = MEMR8(gl + 1), dir = MEMR8(gl + 0x12);
+    static const uint16_t bases[3] = {4, 0x14, 0x24};
+    int base = -1;
+    for (int b = 0; b < 3 && base < 0; b++) /* only while in one of the direction loops */
+        if (ds16((uint16_t)(tbl + bases[b] + dir * 2)) == (uint16_t)(start | count << 8)) base = bases[b];
+    if (base < 0) return 0;
+    uint8_t flag = MEMR8(gl + 0xf);
+    uint16_t a[3] = {flag, (uint16_t)(OBJ_BASE + idx * OBJ_SIZE), SEL_WORLD};
+    uint8_t oct = (uint8_t)rt_callf(0x1010d3a6u, 3, a);
+    uint8_t nd = (uint8_t)((4 - (flag == 0) + MEMR8(gl + 0x11) - oct) & 7);
+    if (nd == dir) return 0;
+    uint16_t e = ds16((uint16_t)(tbl + base + nd * 2));
+    uint8_t frame = MEMR8(o + 3);
+    if (old) *old = (guard_view_t){o, g, frame, start, count, dir};
+    int step = frame - start;
+    if (step < 0 || step >= (e >> 8)) step = 0;
+    MEMW8(o + 3, (uint8_t)((e & 0xff) + step));
+    MEMW16(gl, e);
+    MEMW8(gl + 0x12, nd);
+    return 1;
+}
+
+static void guards_face_viewer(void) {
+    int n = (int16_t)ds16(0x7e4e);
+    for (int i = 0; i < n && i < 200; i++) guard_view(i, NULL);
+}
+
+void net_view_begin(void) {
+    gv_n = 0;
+    if (!net_is_host() || !remote_ready || cur != 0) return;
+    int n = (int16_t)ds16(0x7e4e);
+    for (int i = 0; i < n && i < 200; i++)
+        if (guard_view(i, &gv_saved[gv_n])) gv_n++;
+}
+
+void net_view_end(void) { /* the AI goes on from what it set for its target */
+    for (int i = 0; i < gv_n; i++) {
+        guard_view_t *v = &gv_saved[i];
+        MEMW8(v->obj + 3, v->frame);
+        MEMW8(SEGLIN(SEL_WORLD, v->g), v->start);
+        MEMW8(SEGLIN(SEL_WORLD, v->g + 1), v->count);
+        MEMW8(SEGLIN(SEL_WORLD, v->g + 0x12), v->dir);
+    }
+    gv_n = 0;
+}
+
 void net_client_frame(void) {
     if (!net_is_client() || !got_snapshot) return;
     apply_world();
@@ -751,6 +820,7 @@ void net_client_frame(void) {
     wds8(0x46a4, 1);
     if (my_state == 1) call1(F_SET_ANGLE, (uint16_t)(int)local_angle);
     else local_angle = pl16(&me, P_ANGLE);
+    guards_face_viewer();
     uint8_t powers = me.pl[P_POWER1] | me.pl[P_POWER2];
     if (prev_powers && !powers && (int16_t)ds16(0x4bfe) < 0) call2(F_PALETTE_FX, 3, 0);
     prev_powers = powers;
