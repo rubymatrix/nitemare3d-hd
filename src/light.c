@@ -387,3 +387,24 @@ static void build_lut(void) {
     }
     lut_ambient = light_ambient;
 }
+
+void light_span(double x, double y, double dx, double dy, int n, int layer, float *out) {
+    float z = layer * 32.0f - 32.0f, pr2 = (float)(PLAYER_RADIUS * PLAYER_RADIUS);
+    float qx = (float)(x - ppx), qy = (float)(y - ppy), qdx = (float)dx, qdy = (float)dy, qz2 = z * z;
+    float u = (float)((x - gx0) / CELL - 0.5), v = (float)((y - gy0) / CELL - 0.5), du = (float)(dx / CELL), dv = (float)(dy / CELL);
+    for (int k = 0; k < n; k++, u += du, v += dv, qx += qdx, qy += qdy) {
+        float L = 0;
+        if (have_player) {
+            float d2 = qx * qx + qy * qy + qz2;
+            if (d2 < pr2) { float q = 1 - d2 / pr2; L = (float)PLAYER_LIGHT * q * q; }
+        }
+        if (cmap) {
+            float cu = u < 0 ? 0 : u > gw - 1.001f ? gw - 1.001f : u, cv = v < 0 ? 0 : v > gh - 1.001f ? gh - 1.001f : v;
+            int i = (int)cu, j = (int)cv;
+            float fu = cu - i, fv = cv - j;
+            const float *p = cmap + ((size_t)j * gw + i) * 3 + layer, *q = p + (size_t)gw * 3;
+            L += (p[0] * (1 - fu) + p[3] * fu) * (1 - fv) + (q[0] * (1 - fu) + q[3] * fu) * fv;
+        }
+        out[k] = L;
+    }
+}

@@ -22,6 +22,9 @@ int hud_active(void); /* loaded and enabled */
 
 /* Draw over out (w*h XRGB pixels, pitch in pixels). */
 void hud_draw(uint32_t *out, int pitch, int w, int h);
+/* A few lines of status text in the top left corner on a dark panel (co-op);
+ * needs the HUD font, not the gothic HUD itself. */
+void hud_status(uint32_t *out, int pitch, int w, int h, const char *const *lines, int n);
 
 #ifdef __cplusplus
 }

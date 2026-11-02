@@ -34,6 +34,8 @@ int light_is_source(uint32_t key, const uint8_t *pix, int w, int h);
 /* Light at a point: layer 0 floor, 1 eye height, 2 ceiling, or all three. */
 float light_at(double x, double y, int layer);
 void light_at3(double x, double y, float out[3]);
+/* n points from (x, y) in steps of (dx, dy), at one height */
+void light_span(double x, double y, double dx, double dy, int n, int layer, float *out);
 
 /* Per-channel scale (8.8 fixed point) for light L, and for the untextured
  * floor and ceiling a little light added too, or pools of light on a
