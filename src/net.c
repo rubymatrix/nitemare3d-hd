@@ -37,6 +37,7 @@ void net_sound(const uint16_t args[3]) { (void)args; }
 int net_message(uint32_t text, uint16_t arg) { (void)text; (void)arg; return 0; }
 int net_remote_input(int *forward, int *strafe) { (void)forward; (void)strafe; return 0; }
 int net_peer(uint32_t *obj, double *x, double *y) { (void)obj; (void)x; (void)y; return 0; }
+const uint8_t *net_peer_pixels(uint32_t obj, int *w, int *h, uint32_t *key) { (void)obj; (void)w; (void)h; (void)key; return NULL; }
 #else
 
 #ifdef _WIN32
@@ -773,6 +774,49 @@ void net_player_ticked(void) {
 /* ---------------------------------------------------------------- the other player's sprite */
 static uint16_t peer_sel;
 
+/* The other player is the man in the green lab coat. His 32 walking frames
+ * (8 directions x 4) are in IMG.1, back to back from this offset, each after
+ * a 10-byte header that starts with its width and height. Episode 3's IMG.3
+ * doesn't have him, so he is always read from IMG.1. */
+#define GREEN_MAN_IMG "img.1"
+#define GREEN_MAN_OFF 0x1d2597L
+#define GREEN_MAN_FRAMES 32
+static struct { int w, h; uint8_t *pix; } green[GREEN_MAN_FRAMES];
+static int green_state; /* 0 not tried, 1 loaded, -1 unavailable */
+
+static int green_load(void) {
+    if (green_state) return green_state > 0;
+    green_state = -1;
+    FILE *f = dos_fopen(GREEN_MAN_IMG, "rb");
+    if (!f) return 0;
+    long off = GREEN_MAN_OFF;
+    int k;
+    for (k = 0; k < GREEN_MAN_FRAMES; k++) {
+        uint8_t hdr[10];
+        if (fseek(f, off - 10, SEEK_SET) || fread(hdr, 1, 10, f) != 10) break;
+        int w = hdr[0], h = hdr[1];
+        if (k == 0 && (w != 0x20 || h != 0x3a)) break; /* not the file we know */
+        if (!w || !h) break;
+        green[k].w = w;
+        green[k].h = h;
+        green[k].pix = malloc((size_t)(w * h));
+        if (fread(green[k].pix, 1, (size_t)(w * h), f) != (size_t)(w * h)) break;
+        off += w * h + 10;
+    }
+    fclose(f);
+    if (k == GREEN_MAN_FRAMES) green_state = 1;
+    return green_state > 0;
+}
+
+const uint8_t *net_peer_pixels(uint32_t obj, int *w, int *h, uint32_t *key) {
+    if (!peer_sel || (obj >> 16) != peer_sel || green_state <= 0) return NULL;
+    int f = MEMR8(obj + 3) % GREEN_MAN_FRAMES;
+    *w = green[f].w;
+    *h = green[f].h;
+    *key = 0x80000000u | (uint32_t)(GREEN_MAN_OFF + f); /* its own cache key, apart from the level's art */
+    return green[f].pix;
+}
+
 int net_peer(uint32_t *obj, double *x, double *y) {
     int px, py, ang;
     if (net_is_host() && remote_ready && ctx[1].state != 3) {
@@ -782,15 +826,16 @@ int net_peer(uint32_t *obj, double *x, double *y) {
     } else return 0;
     if (!peer_sel) peer_sel = rt_alloc_selectors(0x40);
     uint32_t o = SEGLIN(peer_sel, 0);
-    /* The look of the other player: the lab-coat man (guard type 0x0f; the
-     * tallest guard if the level has none, N3D_PEER=set overrides), standing
+    /* The look of the other player: the green lab-coat man (above); without
+     * him, the white lab-coat man (guard type 0x0f; the tallest guard if the
+     * level has none, N3D_PEER=set overrides). Standing
      * in the direction they face: frames 0-31 are 8 directions (front, then
      * turning to his right in 45 degree steps) of 4 walking frames each. */
     static int set = -1, lvl = -1, dirs = 8;
     int here = ds16(0x7e42) << 8 | ds16(0x7e44);
     if (lvl != here) { lvl = here; set = -1; }
     if (set < 0 && getenv("N3D_PEER")) set = atoi(getenv("N3D_PEER"));
-    for (int pass = 0, best = 0; set < 0 && pass < 2; pass++)
+    for (int pass = 0, best = 0; set < 0 && !green_load() && pass < 2; pass++)
         for (int i = 0, n = (int16_t)ds16(0x7e4e); i < n; i++) {
             int idx = (int16_t)MEMR16(SEGLIN(SEL_WORLD, GUARD_BASE + i * 0x1a + 8));
             if (idx < 0 || idx >= OBJ_MAX) continue;
@@ -802,8 +847,10 @@ int net_peer(uint32_t *obj, double *x, double *y) {
             if (pass == 0 && MEMR8(g + 6) == 0x0f) { set = gs; break; }
             if (pass == 1 && h > best) { best = h; set = gs; }
         }
+    if (green_load()) set = 0; /* frames come from net_peer_pixels */
     if (set < 0) return 0;
-    dirs = (int16_t)ds16((uint16_t)(0x4734 + set * 8)) >= 32 ? 8 : 1;
+    if (green_state > 0) dirs = 8;
+    else dirs = (int16_t)ds16((uint16_t)(0x4734 + set * 8)) >= 32 ? 8 : 1;
     /* game angles: degrees clockwise from north (-y) */
     double vx = (int16_t)ds16(0x4be6) - px, vy = (int16_t)ds16(0x4be8) - py;
     double toward = atan2(vx, -vy) * 180.0 / 3.14159265358979323846;

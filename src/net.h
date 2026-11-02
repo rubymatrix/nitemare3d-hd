@@ -46,6 +46,8 @@ int net_remote_input(int *forward, int *strafe); /* modern input of the remote p
 
 /* The other player, for the hi-res renderer: a sprite object to draw at x, y. */
 int net_peer(uint32_t *obj, double *x, double *y);
+/* Its picture when it is not one of the level's art (else NULL): column-major w x h pixels and a cache key. */
+const uint8_t *net_peer_pixels(uint32_t obj, int *w, int *h, uint32_t *key);
 
 #ifdef __cplusplus
 }
