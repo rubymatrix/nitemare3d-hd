@@ -1212,6 +1212,21 @@ static const char *lan_address(void) {
         }
         freeifaddrs(list);
     }
+#else
+    /* No getifaddrs: the address a UDP socket would leave from towards a
+     * documentation address. Connecting a UDP socket only picks the route;
+     * nothing is sent. */
+    sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s != BAD_SOCK) {
+        struct sockaddr_in to = {0}, me = {0};
+        int len = sizeof me;
+        to.sin_family = AF_INET;
+        to.sin_port = htons(9);
+        inet_pton(AF_INET, "192.0.2.1", &to.sin_addr);
+        if (connect(s, (struct sockaddr *)&to, sizeof to) == 0 && getsockname(s, (struct sockaddr *)&me, &len) == 0 && me.sin_addr.s_addr)
+            inet_ntop(AF_INET, &me.sin_addr, addr, sizeof addr);
+        sock_close(s);
+    }
 #endif
     return addr[0] ? addr : NULL;
 }
