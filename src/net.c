@@ -7,8 +7,9 @@
  * client sends its keys, view angle and position once per drawn frame. The
  * client moves itself (the game's own movement, walls and doors included) and
  * the host puts player 2 where it says, so neither turning nor walking waits
- * for the network; the host still runs player 2's tick for pickups, using
- * and firing, and its moves (level start, respawn) win over the client's. */
+ * for the network; the host picks up what player 2 walks onto, runs their
+ * tick for using and firing, and its moves (level start, respawn) win over
+ * the client's. */
 #include "net.h"
 #include "rt/rt.h"
 #include "rt/host.h"
@@ -96,6 +97,7 @@ typedef int sock_t;
 #define F_SET_ANGLE 0x1010e40au   /* set_view_angle(degrees) */
 #define F_SET_POS 0x1010897cu     /* place the player at (x, y) */
 #define F_PLAYER_TICK 0x10109758u
+#define F_PICKUP 0x1010ceb2u      /* pick up the item in a map cell (offset, segment) */
 #define F_MOVE 0x10108a08u        /* move_player(degrees, sideways, speed): walls and doors stop it */
 #define F_DYING_TURN 0x1010d84eu  /* turn to face the killer, then state 3 */
 #define F_QUEUE_SPRITE 0x1010cbceu
@@ -548,17 +550,39 @@ static void remote_weapon_step(void) {
 
 /* The remote player's frame: their view (it marks the guards they can shoot),
  * dying turn, and tick, all with their context in the globals. */
+/* Picking up is part of the game's movement (FUN_1010_8560 -> 8450 ->
+ * FUN_1010_ceb2, on the map cells at the edge of each step), which the host
+ * no longer runs for player 2: pick up what is in the cells they touch. */
+static void remote_pickups(void) {
+    int x = (int16_t)ds16(0x4be6), y = (int16_t)ds16(0x4be8);
+    uint16_t seen[4];
+    int n = 0;
+    for (int dy = -0x1b; dy <= 0x1b; dy += 0x36)
+        for (int dx = -0x1b; dx <= 0x1b; dx += 0x36) {
+            /* the map cell address as FUN_1010_8560 forms it */
+            uint16_t cell = (uint16_t)(((y + dy) & 0xffc0) * 2 + (((x + dx) & 0xffdf) >> 5) - 0x5962);
+            int dup = 0;
+            for (int i = 0; i < n; i++) dup |= seen[i] == cell;
+            if (dup) continue;
+            seen[n++] = cell;
+            if (ds8(0x7f84 + MEMR8(SEGLIN(SEL_WORLD, (uint16_t)(cell + 1)))) & 4)
+                call2(F_PICKUP, cell, SEL_WORLD);
+        }
+}
+
 static void remote_frame(void) {
     if (ctx[1].state == 3) respawn(1);
     swap_to(1);
     remote_weapon_step(); /* where the host draws its own weapon, before the tick */
     if (ds8(0x46a4) == 1 && rin.have) call1(F_SET_ANGLE, (uint16_t)rin.angle);
     /* Player 2 moves itself: put them where they say, unless that is from
-     * before our last move of them (level start, respawn). The tick below
-     * then picks up what is there, as if they had walked onto it. */
+     * before our last move of them (level start, respawn), and pick up what
+     * is there, as if they had walked onto it. */
     if (ds8(0x46a4) == 1 && rin.have_pos && rin.epoch == epoch &&
-        (rin.x != (int16_t)ds16(0x4be6) || rin.y != (int16_t)ds16(0x4be8)))
+        (rin.x != (int16_t)ds16(0x4be6) || rin.y != (int16_t)ds16(0x4be8))) {
         call2(F_SET_POS, (uint16_t)rin.x, (uint16_t)rin.y);
+        remote_pickups();
+    }
     wds8(0x3752, rin.keys0);
     wds8(0x3753, rin.keys1);
     if (rin.typed) { wds8(0x0108, rin.typed); rin.typed = 0; }
@@ -982,13 +1006,13 @@ static void debug_log(void) {
     if (!on || host_ticks_ms() - last < 500) return;
     last = host_ticks_ms();
     if (role == 1)
-        fprintf(stderr, "netlog host: weapons %02x w%d ammo %d | keys %02x/%02x p2 %02x/%02x | p2 weapons %02x weapon %d ammo %d %d %d | state %d hp %d at %d,%d a%d | p2 state %d hp %d at %d,%d a%d in(%02x %02x f%d s%d a%d) 46a6=%d hostkeys %02x %02x t%02x\n",
+        fprintf(stderr, "netlog host: weapons %02x w%d ammo %d | keys %02x/%02x p2 %02x/%02x | p2 weapons %02x weapon %d ammo %d %d %d | state %d hp %d at %d,%d a%d | p2 state %d hp %d at %d,%d a%d in(%02x %02x f%d s%d a%d pos %d,%d e%d/%d %d) 46a6=%d hostkeys %02x %02x t%02x\n",
                 ds8(0x4c1a), (int8_t)ds8(0x4c13), ds8(0x4c10),
                 ds8(0x4c18), ds8(0x4c19), ctx[1].pl[0x4c18 - PL_OFF], ctx[1].pl[0x4c19 - PL_OFF], ctx[1].pl[0x4c1a - PL_OFF],
                 (int8_t)ctx[1].pl[0x4c13 - PL_OFF], ctx[1].pl[0x4c34 - PL_OFF], ctx[1].pl[0x4c0f - PL_OFF], ctx[1].pl[0x4c10 - PL_OFF],
                 ds8(0x46a4), ds8(0x4c0d), (int16_t)ds16(0x4be6), (int16_t)ds16(0x4be8), (int16_t)ds16(0x4bda),
                 ctx[1].state, ctx[1].pl[P_HEALTH], pl16(&ctx[1], P_X), pl16(&ctx[1], P_Y), pl16(&ctx[1], P_ANGLE),
-                rin.keys0, rin.keys1, rin.forward, rin.strafe, rin.angle, ds16(0x46a6), ds8(0x3752), ds8(0x3753), ds8(0x0108));
+                rin.keys0, rin.keys1, rin.forward, rin.strafe, rin.angle, rin.x, rin.y, rin.epoch, epoch, rin.have_pos, ds16(0x46a6), ds8(0x3752), ds8(0x3753), ds8(0x0108));
 }
 
 void net_player_ticked(void) {
