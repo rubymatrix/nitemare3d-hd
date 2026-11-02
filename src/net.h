@@ -10,7 +10,8 @@
  * The client runs the same game as a terminal: it loads the same level,
  * applies the world state the host sends after every frame (segment 1040
  * and a few DS globals) plus its own player record, draws its view and sends
- * its input. It never runs game logic.
+ * its input. Apart from moving itself (its place and view angle are its own,
+ * sent to the host, which puts player 2 there) it never runs game logic.
  */
 #pragma once
 #include <stdint.h>

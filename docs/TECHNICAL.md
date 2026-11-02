@@ -635,10 +635,16 @@ regenerate `src/gen/` with `tools/recomp.py` after changing it).
   (`FUN_1018_26ac` 0x15..0x17), then mirrors after every host frame segment
   1040 (walls, objects, guards, doors, map) and a few DS globals (projectiles,
   switches, counts, darkening remap, object list) as delta records, its own
-  player record and the sounds played (`FUN_1010_e2a4`). It never runs game
+  player record and the sounds played (`FUN_1010_e2a4`). It runs no game
   logic (`FUN_1010_d8c6`, doors, projectiles and the player tick are
-  replaced); it draws and sends keys, W/A/S/D and its own view angle, so
-  turning has no network delay. Snapshots are applied one per drawn frame
+  replaced) except moving itself: walking and turning go through the game's
+  own `move_player` (`FUN_1010_8a08`, walls and doors stop it) on the client,
+  which keeps its own place over the host's copy, so neither waits for the
+  network. It sends its keys (fire, use), view angle and position; the host
+  puts player 2 there (`FUN_1010_897c`) before running their tick, which picks
+  up what is there, and draws them easing toward each new position. A move by
+  the host (level start, respawn) bumps an epoch; positions from before it are
+  ignored and the client takes the host's place. Snapshots are applied one per drawn frame
   with one in reserve. Object animation stays local except for guards, whose
   frames are their state; each screen turns guards to face where they go as
   seen from that viewer (`FUN_1010_6e3c`).

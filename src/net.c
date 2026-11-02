@@ -4,8 +4,11 @@
  * endian. The host sends a snapshot after each frame it draws (25 a second):
  * the world as delta records against what it sent before, the client's own
  * player record, where the host player is and the sounds played since. The
- * client sends its keys, W/A/S/D and its view angle once per drawn frame; the
- * view angle is the client's own, so turning has no network delay. */
+ * client sends its keys, view angle and position once per drawn frame. The
+ * client moves itself (the game's own movement, walls and doors included) and
+ * the host puts player 2 where it says, so neither turning nor walking waits
+ * for the network; the host still runs player 2's tick for pickups, using
+ * and firing, and its moves (level start, respawn) win over the client's. */
 #include "net.h"
 #include "rt/rt.h"
 #include "rt/host.h"
@@ -93,6 +96,7 @@ typedef int sock_t;
 #define F_SET_ANGLE 0x1010e40au   /* set_view_angle(degrees) */
 #define F_SET_POS 0x1010897cu     /* place the player at (x, y) */
 #define F_PLAYER_TICK 0x10109758u
+#define F_MOVE 0x10108a08u        /* move_player(degrees, sideways, speed): walls and doors stop it */
 #define F_DYING_TURN 0x1010d84eu  /* turn to face the killer, then state 3 */
 #define F_QUEUE_SPRITE 0x1010cbceu
 #define F_PALETTE_FX 0x1010b0f6u
@@ -185,7 +189,7 @@ static size_t in_len, in_cap, out_len, out_cap;
 
 enum { M_HELLO = 1, M_WELCOME, M_LEVEL, M_SNAP, M_INPUT, M_MSG, M_BYE, M_PING, M_PONG };
 #define NET_MAGIC 0x504d334eu /* "N3MP" */
-#define NET_VERSION 2
+#define NET_VERSION 3
 
 static void set_nonblocking(sock_t s) {
 #ifdef _WIN32
@@ -300,7 +304,14 @@ static int in_level(void) {
 /* host */
 static int have_level;      /* a level is loaded (net_level_loaded ran and the game is still on) */
 static uint16_t level_ep, level_no, level_diff;
-static struct { uint8_t keys0, keys1, typed; int8_t forward, strafe; int16_t angle; int have; } rin;
+static struct {
+    uint8_t keys0, keys1, typed;
+    int8_t forward, strafe;
+    int16_t angle;
+    int16_t x, y;   /* where player 2 moved itself */
+    uint16_t epoch; /* the host move it moved on from: older ones are stale */
+    int have, have_pos;
+} rin;
 static uint16_t sounds[64][3];
 static int nsounds;
 static uint32_t snap_seq;
@@ -316,6 +327,8 @@ static uint16_t my_epoch = 0xffff;
 static int32_t clock_delta; /* our clock - host clock */
 static uint16_t host_frame_no;
 static double local_angle;
+static uint8_t my_loc[P_LOC1 - P_LOC0]; /* where we moved ourselves (4bda..4c03) */
+static int have_loc;
 static int16_t peer_x, peer_y, peer_angle;
 static uint8_t peer_state;
 static int peer_known;
@@ -505,7 +518,7 @@ static void accept_peer(void) {
     set_nonblocking(s);
     peer = s;
     in_len = out_len = 0;
-    rin.have = 0;
+    rin.have = rin.have_pos = 0;
     rtt_ms = -1;
     peer_since_ms = host_ticks_ms();
     fprintf(stderr, "net: player 2 connected\n");
@@ -540,6 +553,12 @@ static void remote_frame(void) {
     swap_to(1);
     remote_weapon_step(); /* where the host draws its own weapon, before the tick */
     if (ds8(0x46a4) == 1 && rin.have) call1(F_SET_ANGLE, (uint16_t)rin.angle);
+    /* Player 2 moves itself: put them where they say, unless that is from
+     * before our last move of them (level start, respawn). The tick below
+     * then picks up what is there, as if they had walked onto it. */
+    if (ds8(0x46a4) == 1 && rin.have_pos && rin.epoch == epoch &&
+        (rin.x != (int16_t)ds16(0x4be6) || rin.y != (int16_t)ds16(0x4be8)))
+        call2(F_SET_POS, (uint16_t)rin.x, (uint16_t)rin.y);
     wds8(0x3752, rin.keys0);
     wds8(0x3753, rin.keys1);
     if (rin.typed) { wds8(0x0108, rin.typed); rin.typed = 0; }
@@ -729,9 +748,10 @@ static void client_snapshot(rd_t *r) {
         uint16_t a[3] = {get16(r), get16(r), get16(r)};
         rt_callf(F_SOUND, 3, a);
     }
-    if (ep != my_epoch) { /* moved by the host: take its view angle */
+    if (ep != my_epoch) { /* moved by the host: take its place and view angle */
         my_epoch = ep;
         local_angle = pl16(&me, P_ANGLE);
+        have_loc = 0;
     }
     got_snapshot = 1;
     snaps_since_frame++;
@@ -855,6 +875,11 @@ void net_client_frame(void) {
         fprintf(stderr, "netlog snapshots per frame: 0:%d 1:%d 2:%d 3+:%d\n", snap_hist[0], snap_hist[1], snap_hist[2], snap_hist[3]);
     apply_world();
     memcpy(ds_ptr(PL_OFF), me.pl, PL_LEN);
+    /* our place is our own while we play: the host's copy of it is a round
+     * trip old. When it moved us (or we are down) we take the host's. */
+    if (my_state != 1) have_loc = 0;
+    else if (!have_loc) { memcpy(my_loc, me.pl + P_LOC0, sizeof my_loc); have_loc = 1; }
+    else memcpy(ds_ptr(PL_OFF + P_LOC0), my_loc, sizeof my_loc);
     wds8(0x01fa, me.cool);
     wds32(0x53cc, host_frame_no);
     wds8(0x46a4, 1);
@@ -883,6 +908,11 @@ void net_client_projectiles(void) {
     }
 }
 
+static void client_move(int angle, int sideways, int speed) {
+    uint16_t a[3] = {(uint16_t)(((angle % 360) + 360) % 360), (uint16_t)sideways, (uint16_t)speed};
+    rt_callf(F_MOVE, 3, a);
+}
+
 /* Our input for the host, once per drawn frame (in place of the player tick). */
 static void client_input(void) {
     uint8_t typed = ds8(0x0108);
@@ -904,27 +934,44 @@ static void client_input(void) {
     int fwd = 0, side = 0, turn = 0;
     host_modern_input(&fwd, &side, &turn);
     uint8_t k0 = ds8(0x3752), k1 = ds8(0x3753);
-    if (!(k1 & 1)) { /* arrows turn here (Alt+arrows strafe on the host) */
+    if (!(k1 & 1)) { /* arrows turn here */
         int speed = (int16_t)ds16(0x53e8);
         if (k0 & 0x20) speed *= 2;
         if (k0 & 0x40) speed = 1;
         if (k0 & 8) turn -= speed;
         if (k0 & 0x10) turn += speed;
-        k0 &= (uint8_t)~0x18;
-    }
+    } else side += ((k0 & 0x10) != 0) - ((k0 & 8) != 0); /* Alt+arrows strafe */
+    if (k0 & 2) fwd = 1; /* up/down arrows walk */
+    if (k0 & 4) fwd = -1;
+    k0 &= (uint8_t)~0x1e; /* we move ourselves: the host only fires and uses for us */
     if (my_state == 1) {
         local_angle += turn;
         while (local_angle < 0) local_angle += 360;
         while (local_angle >= 360) local_angle -= 360;
         call1(F_SET_ANGLE, (uint16_t)(int)local_angle);
     }
+    if (my_state == 1 && have_loc) {
+        /* the host's player tick moves this way too (src/rt/overrides.c) */
+        int speed = (int16_t)ds16(0x53e6), angle = (int)local_angle;
+        if (k0 & 0x20) speed *= 2; /* right shift: run */
+        if (k0 & 0x40) speed = 1;  /* left shift: fine control */
+        if (fwd > 0) client_move(angle, 0, speed);
+        if (fwd < 0) client_move(angle + 180, 0, speed);
+        if (side < 0) client_move(angle + 270, 1, speed);
+        if (side > 0) client_move(angle + 90, 1, speed);
+        memcpy(my_loc, ds_ptr(PL_OFF + P_LOC0), sizeof my_loc);
+    }
     msg_begin(M_INPUT);
     put8(k0);
     put8(k1);
     put8(typed);
-    put8((uint8_t)(int8_t)fwd);
-    put8((uint8_t)(int8_t)side);
+    put8(0); /* forward, strafe: the host no longer moves us */
+    put8(0);
     put16((uint16_t)(int16_t)local_angle);
+    put16(ds16(0x4be6));
+    put16(ds16(0x4be8));
+    put16(my_epoch);
+    put8((uint8_t)(my_state == 1 && have_loc));
     msg_end();
 }
 
@@ -1006,10 +1053,27 @@ const uint8_t *net_peer_pixels(uint32_t obj, int *w, int *h, uint32_t *key) {
 
 int net_peer(uint32_t *obj, double *x, double *y) {
     int px, py, ang;
+    double fx, fy; /* where to draw them */
     if (net_is_host() && remote_ready && ctx[1].state != 3) {
         px = pl16(&ctx[1], P_X); py = pl16(&ctx[1], P_Y); ang = pl16(&ctx[1], P_ANGLE);
+        /* Player 2 moves itself, so their place changes whenever their
+         * packets arrive: draw them easing toward it (about 50 ms behind),
+         * straight there after a jump (respawn, level start). */
+        static double sx, sy;
+        static uint64_t st;
+        uint64_t now = host_time_us();
+        double dt = st && now > st ? (now - st) / 1e6 : 0;
+        st = now;
+        if (dt == 0 || dt > 0.5 || fabs(px - sx) > 256 || fabs(py - sy) > 256) { sx = px; sy = py; }
+        else {
+            double k = 1 - exp(-dt / 0.05);
+            sx += (px - sx) * k;
+            sy += (py - sy) * k;
+        }
+        fx = sx; fy = sy;
     } else if (net_is_client() && peer_known && peer_state != 3) {
         px = peer_x; py = peer_y; ang = peer_angle;
+        fx = px; fy = py;
     } else return 0;
     if (!peer_sel) peer_sel = rt_alloc_selectors(0x40);
     uint32_t o = SEGLIN(peer_sel, 0);
@@ -1054,12 +1118,12 @@ int net_peer(uint32_t *obj, double *x, double *y) {
     MEMW8(o + 4, (uint8_t)set);
     MEMW8(o + 5, 1);
     MEMW8(o + 6, 0);
-    MEMW16(o + 0x10, (uint16_t)px);
-    MEMW16(o + 0x12, (uint16_t)py);
+    MEMW16(o + 0x10, (uint16_t)(int16_t)lround(fx));
+    MEMW16(o + 0x12, (uint16_t)(int16_t)lround(fy));
     MEMW8(o + 0x1a, 0);
     *obj = o;
-    *x = px;
-    *y = py;
+    *x = fx;
+    *y = fy;
     return 1;
 }
 
@@ -1093,6 +1157,10 @@ static void handle(uint8_t type, rd_t *r) {
             rin.forward = (int8_t)get8(r);
             rin.strafe = (int8_t)get8(r);
             rin.angle = (int16_t)get16(r);
+            rin.x = (int16_t)get16(r);
+            rin.y = (int16_t)get16(r);
+            rin.epoch = get16(r);
+            rin.have_pos = get8(r);
             rin.have = 1;
             break;
         case M_BYE: drop_peer("player 2 left"); break;
