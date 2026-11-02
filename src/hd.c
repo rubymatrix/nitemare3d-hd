@@ -27,6 +27,7 @@
 #include "hd_pack.h"
 #include "hud.h"
 #include "light.h"
+#include "net.h"
 #include "rt/rt.h"
 #include "rt/host.h"
 
@@ -720,11 +721,14 @@ static void draw_sprite_columns(void *ctx, int x0, int x1) {
 }
 
 /* the picture an object shows this frame (and its frame entry) */
-static const uint8_t *sprite_pixels(uint32_t o, uint16_t *entry, int *sw, int *sh) {
+static const uint8_t *sprite_pixels(uint32_t o, uint16_t *entry, int *sw, int *sh, uint32_t *key) {
+    const uint8_t *peer = net_peer_pixels(o, sw, sh, key);
+    if (peer) { *entry = 0; return peer; }
     uint8_t set = MEMR8(o + 4), frame = MEMR8(o + 3);
     int q = was_queued(o);
     if (q >= 0) frame = queued_frame[q]; /* what the original drew this frame */
     *entry = (uint16_t)(dsu16((uint16_t)(0x473a + set * 8)) + frame * 10);
+    *key = (uint32_t)ds32((uint16_t)(*entry + 2));
     *sw = ds8(*entry);
     *sh = ds8((uint16_t)(*entry + 1));
     if (*sw <= 0 || *sh <= 0) return NULL;
@@ -771,6 +775,13 @@ static void render_sprites(const cam_t *cam) {
         list[n].y = y;
         n++;
     }
+    { /* the other co-op player */
+        uint32_t po;
+        double x, y;
+        if (net_peer(&po, &x, &y)) {
+            list[n].obj = po; list[n].x = x; list[n].y = y; n++;
+        }
+    }
     if (light_pass) { /* every light in the level, seen or not: it may light what is */
         light_begin();
         for (int i = 0; i < n; i++) {
@@ -778,9 +789,10 @@ static void render_sprites(const cam_t *cam) {
             if (!(MEMR8(o + 5) & 1)) continue;
             uint16_t entry;
             int sw, sh;
-            const uint8_t *pix = sprite_pixels(o, &entry, &sw, &sh);
+            uint32_t key;
+            const uint8_t *pix = sprite_pixels(o, &entry, &sw, &sh, &key);
             int8_t raise = (int8_t)MEMR8(o + 0x1a);
-            if (pix) light_sprite((uint32_t)ds32((uint16_t)(entry + 2)), pix, sw, sh, list[i].x, list[i].y, raise > 0 ? raise : 0);
+            if (pix) light_sprite(key, pix, sw, sh, list[i].x, list[i].y, raise > 0 ? raise : 0);
         }
         light_end(cam->px, cam->py);
         return;
@@ -812,7 +824,8 @@ static void render_sprites(const cam_t *cam) {
         int8_t raise = (int8_t)MEMR8(o + 0x1a);
         uint16_t entry;
         int sw, sh;
-        const uint8_t *pix = sprite_pixels(o, &entry, &sw, &sh);
+        uint32_t key;
+        const uint8_t *pix = sprite_pixels(o, &entry, &sw, &sh, &key);
         if (!pix) continue;
         double hh = cam->hs / (16.0 * a);   /* rows from horizon to the floor at this depth */
         double texel = hh / 32.0;           /* rows (and columns) per texel */
@@ -830,7 +843,7 @@ static void render_sprites(const cam_t *cam) {
         if (d->r0 < 0) d->r0 = 0;
         if (d->r1 > bh) d->r1 = bh;
         if (d->c0 >= d->c1 || d->r0 >= d->r1) continue;
-        d->tex = hq_get((uint32_t)ds32((uint16_t)(entry + 2)), pix, sw, sh, 1, NULL);
+        d->tex = hq_get(key, pix, sw, sh, 1, NULL);
         if (!d->tex) continue;
         d->left = (float)left;
         d->top = (float)top;
@@ -840,7 +853,7 @@ static void render_sprites(const cam_t *cam) {
         d->sh = sh;
         d->depth = (float)a;
         d->ignore_depth = (flags & 0x10) != 0;
-        d->lit = lighting && !light_is_source((uint32_t)ds32((uint16_t)(entry + 2)), pix, sw, sh);
+        d->lit = lighting && !light_is_source(key, pix, sw, sh);
         if (d->lit) { /* lit as at its middle */
             float L[3], z = (float)((raise > 0 ? raise : 0) + sh * 0.5);
             light_at3(list[i].x, list[i].y, L);
@@ -1247,6 +1260,13 @@ static void hit_flash(uint32_t *out, int pitch) {
     hq_parallel(flash_rows, &j, out_h);
 }
 
+/* co-op status in the corner, over menus and play alike */
+static void net_panel(uint32_t *out, int pitch) {
+    const char *lines[4];
+    int n = net_status(lines, 4);
+    if (n) hud_status(out, pitch, out_w, out_h, lines, n);
+}
+
 void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, int pitch) {
     uint32_t lut[256];
     for (int i = 0; i < 256; i++) lut[i] = 0xff000000u | ((uint32_t)pal[i][0] << 16) | ((uint32_t)pal[i][1] << 8) | pal[i][2];
@@ -1289,7 +1309,7 @@ void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, 
         if (cj.tex) { cj.pic = ui->idx; cj.tw = pic->w; }
     }
     hq_parallel(compose_rows, &cj, out_h);
-    if (!use_hd) return;
+    if (!use_hd) { net_panel(out, pitch); return; }
     refresh_palette();
     /* overlays, each anchored to the matching part of the widened view */
     double shift[5] = {0, 0, RX0 - (ox + vx0 * kx), RX1 - (ox + (vx1 + 1) * kx), bob_wx * kx};
@@ -1341,4 +1361,5 @@ void hd_compose(const uint8_t *frame, const uint8_t pal[256][3], uint32_t *out, 
     }
     hit_flash(out, pitch);
     if (full_hud) hud_draw(out, pitch, out_w, out_h);
+    net_panel(out, pitch);
 }
